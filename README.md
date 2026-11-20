@@ -1,6 +1,6 @@
 # edge-infer
 
-**端侧三层卸载多硬件推理平台 · 本地 AI 工作台（WorkBuddy 式 Agent）**
+**端侧三层卸载多硬件推理平台 · 本地 AI 工作台**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
@@ -9,7 +9,7 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-24C8DB.svg)](https://tauri.app/)
 
 在 Windows 上运行本地大模型：**Rust 自研三层卸载内核**（SSD / 内存 / 显存）+
-**OpenVINO 推理服务**（NVIDIA GPU / Intel NPU / CPU）+ **类 WorkBuddy 的本地
+**OpenVINO 推理服务**（NVIDIA GPU / Intel NPU / CPU）+ **本地
 Agent 工作台**（可真正操作文件系统、创建项目文件夹、执行命令）。
 
 > 目标：让原本跑不动大模型的 Windows 笔记本也能跑起来，并支持更长的上下文。
@@ -28,11 +28,11 @@ Agent 工作台**（可真正操作文件系统、创建项目文件夹、执行
 - **纯 OpenVINO 推理链路** — 不依赖 torch / transformers，只用 `openvino` +
   `tokenizers` + `numpy`，绕开版本地狱（VLM 路径）。
 - **OpenVINO GenAI 后端** — `LLMPipeline` 驱动 NPU/GPU/CPU，支持 **SSE 流式输出**。
-- **本地 Agent（WorkBuddy 式）** — 模型可自主调用工具：创建任务文件夹、
+- **本地 Agent** — 模型可自主调用工具：创建任务文件夹、
   读写文件、搜索、执行命令；全部限制在沙箱工作区内。
 - **OpenAI 兼容 API** — 对外暴露 `/v1/chat/completions`（含 `stream=true`），
   可被任意客户端调用；支持 API Key 鉴权。
-- **类 WorkBuddy 工作台 GUI** — 对话 / Agent 工作区 / 三层方案 / 模型 / 设置
+- **工作台 GUI** — 对话 / Agent 工作区 / 三层方案 / 模型 / 设置
   五个视图；会话列表持久化；可切换本地引擎 or 外接 OpenAI API。
 - **Tauri 原生窗口** — 6.7MB 原生 exe，非浏览器外壳。
 
