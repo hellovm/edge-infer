@@ -140,6 +140,37 @@ Measured with `llama-bench` (`-p 512 -n 128`, 3 reps) and `scripts/bench_ov.py`
 (531-token prompt, 128 generated tokens, 2 reps). Prefill = prompt processing,
 decode = steady-state generation.
 
+### Large MoE 3-tier offloading (the headline)
+
+**An 80B model runs on 8 GB VRAM + 32 GB RAM** — this is the project's core
+scenario. `Qwen3-Next-80B-A3B` (48.5 GB, 80B total / 3B active) uses
+`--n-cpu-moe` to keep MoE layers on CPU/RAM while attention and dense layers
+stay in VRAM:
+
+| Backend · Device | Offload config | Prefill tok/s | Decode tok/s | Notes |
+|---|---|---|---|---|
+| llama.cpp CUDA · RTX 4070 8 GB | `ncmoe=48` | **34.2** | **9.5** | best; ~48/64 MoE layers in RAM |
+| llama.cpp Vulkan · Intel Arc | `ncmoe=48` | 6.4 | 3.9 | 15.5 GB shared-memory ceiling |
+| ~~llama.cpp CUDA · `ngl=999` full offload~~ | — | — | — | ❌ immediate OOM (needs 46 GB VRAM) |
+
+`--n-cpu-moe` sweep (NVIDIA, `-p 128 -n 64`):
+
+| ncmoe | Prefill tok/s | Decode tok/s |
+|---|---|---|
+| 30 | 4.3 | 3.0 |
+| 40 | 3.6 | 3.6 |
+| 44 | 9.8 | 3.9 |
+| **48** | **10.8** | **7.3** ← best |
+| 52 | 12.6 | 7.0 |
+| 56 | 15.2 | 6.2 |
+| 60 | 13.3 | 4.7 |
+
+> More offload means less VRAM pressure but the CPU-side bandwidth becomes the
+> bottleneck — around 48 layers is the sweet spot ("fit every layer that fits in
+> VRAM, spill the rest to RAM"). **Going 8B → 80B is 10× the parameters, yet
+> decode only drops from 43.3 to 9.5 tok/s (~4.6×)** — that is exactly the value
+> of MoE plus 3-tier offloading.
+
 ### Reading the numbers
 
 - **NVIDIA → llama.cpp CUDA, always.** The RTX 4070 beats every other option on
@@ -147,13 +178,17 @@ decode = steady-state generation.
   **91×** on prefill — OpenVINO's GPU plugin is built for Intel silicon.
 - **Intel Arc iGPU is the strongest non-NVIDIA option** — prefill is within 1.8×
   of the 4070, and it shares system RAM, so it can host models larger than its
-  dedicated budget.
+  dedicated budget (80B runs too, via Vulkan + 3-tier offloading).
 - **NPU is for always-on, low-power inference**, not throughput: 6.4 tok/s at a
   fraction of the power. It has no dedicated VRAM, so it uses a SSD + RAM
   two-tier split.
 - **Prefill vs decode diverge sharply on CPU.** CPUs vectorize prompt
   processing well (198–283 tok/s) but are memory-bandwidth-bound per generated
   token, hence the 4.5 tok/s decode.
+- **iGPU/Vulkan trade-off**: for 8B on the Arc iGPU, Vulkan (140/9.2) is
+  **slower** than OpenVINO (1298/12.0) — OpenVINO is Intel's native optimized
+  path. But no OpenVINO IR exists for 80B, so Vulkan + `--n-cpu-moe` is the only
+  way to run it there.
 
 ---
 
@@ -410,6 +445,11 @@ cargo test                          # Rust kernel unit tests
 # performance
 python scripts/bench_llama.py models/qwen3-8b-gguf/Qwen3-8B-Q4_K_M.gguf --ngl 999
 python scripts/bench_ov.py models/qwen3-8b-int4-cw-ov NPU
+
+# 80B 3-tier offloading
+D:/AI/tools/llama/llama-bench.exe \
+  -m models/qwen3-next-80b-a3b-instruct-gguf/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf \
+  -ngl 999 -ncmoe 48 -p 512 -n 128 -r 2
 ```
 
 ---

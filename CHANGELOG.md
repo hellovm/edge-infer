@@ -7,7 +7,23 @@
 
 ## [Unreleased]
 
-（暂无）
+### Added
+- **`scripts/bench_llama.py` / `scripts/bench_ov.py`**：性能基准脚本，
+  分别封装 `llama-bench`（含 `--n-cpu-moe` 三层卸载）与 OpenVINO GenAI
+  （拆分 prefill / decode 计时），便于复现 README 性能表。
+- **README 中英双版**：`README.md`（简体中文，默认）+ `README_EN.md`（English），
+  顶部互链。
+
+### Changed
+- README 性能表由 **Qwen3-0.6B** 换为 **Qwen3-8B** 实测，并新增超大 MoE
+  三层卸载章节（80B-A3B 在 8 GB 显存上 `--n-cpu-moe` 扫描结果）。
+
+### Fixed
+- **速度统计严重失真**：llama.cpp 路径原来用「字符数 ÷ 2」估算 token 与
+  tok/s，慢模型会被大幅低估（80B 实测被报成 0.36 tok/s，真实为 5.0）。
+  改为向 llama-server 请求 `stream_options.include_usage`，直接采用其
+  真实 `usage` 与 `timings`（`predicted_per_second` / `prompt_per_second`），
+  并在 SSE 末帧补充 `prefill_tok_s` / `ttft_ms`。
 
 ## [0.2.1] - 2026-11-20
 

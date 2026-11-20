@@ -40,7 +40,8 @@
 
   关键结论：**OpenVINO 的 GPU 插件面向 Intel 优化，把 N 卡交给它等于浪费约 19 倍性能**。
   因此 N 卡一律走 llama.cpp CUDA，Intel GPU / NPU 走 OpenVINO。
-  （完整的 prefill / decode 与测试条件见 [性能实测](#-性能实测)。）
+  **超大 MoE（80B-A3B）在 8 GB 显存上靠 `--n-cpu-moe` 三层卸载也能跑：N 卡 decode 9.5 tok/s。**
+  （完整的 prefill / decode、`ncmoe` 扫描与测试条件见 [性能实测](#-性能实测)。）
 
 - **同一模型按设备自动匹配格式** — 模型目录按「模型 → 变体」组织：同一个模型名下
   挂 `nvidia` / `intel-gpu` / `npu` 多套变体，选中硬件后自动取对应格式
@@ -126,17 +127,48 @@ Unsupported DynamicDequantizeOp configuration:
 （531 token 提示词、生成 128 token、2 次取优）。Prefill = 提示词处理，
 decode = 稳态生成。
 
+### 超大 MoE 三层卸载（重点）
+
+**80B 模型在 8 GB 显存 + 32 GB 内存上跑起来** —— 这是本项目的核心场景。
+模型 `Qwen3-Next-80B-A3B`（48.5 GB，总参 80B / 激活 3B），用
+`--n-cpu-moe` 把 MoE 层放 CPU/内存、注意力与 dense 层留显存：
+
+| 后端 · 设备 | 卸载配置 | Prefill tok/s | Decode tok/s | 备注 |
+|---|---|---|---|---|
+| llama.cpp CUDA · RTX 4070 8 GB | `ncmoe=48` | **34.2** | **9.5** | 最优；约 48/64 层 MoE 落在内存 |
+| llama.cpp Vulkan · Intel Arc | `ncmoe=48` | 6.4 | 3.9 | 共享内存上限 15.5 GB |
+| ~~llama.cpp CUDA · `ngl=999` 全量卸载~~ | — | — | — | ❌ 直接 OOM（需 46 GB 显存） |
+
+`--n-cpu-moe` 扫描结果（N 卡，`-p 128 -n 64`）：
+
+| ncmoe | Prefill tok/s | Decode tok/s |
+|---|---|---|
+| 30 | 4.3 | 3.0 |
+| 40 | 3.6 | 3.6 |
+| 44 | 9.8 | 3.9 |
+| **48** | **10.8** | **7.3** ← 最优 |
+| 52 | 12.6 | 7.0 |
+| 56 | 15.2 | 6.2 |
+| 60 | 13.3 | 4.7 |
+
+> 卸载越多，显存压力越小但 CPU 侧带宽成为瓶颈 —— 48 层附近是
+> 「显存装得下的层都装下、剩下的丢内存」的平衡点。**8B → 80B 参数量涨 10×，
+> decode 只从 43.3 掉到 9.5 tok/s（约 4.6×）**，这正是 MoE + 三层卸载的价值。
+
 ### 怎么读这组数
 
 - **N 卡一律走 llama.cpp CUDA。** RTX 4070 在两个维度都碾压其它选项；
   交给 OpenVINO（GPU.1）decode 慢 **18.8×**、prefill 慢 **91×** ——
   OpenVINO 的 GPU 插件是为 Intel 芯片打造的。
 - **Intel Arc 核显是非 N 卡里的最强选项** —— prefill 只比 4070 慢 1.8×，
-  而且它共享系统内存，能承载超出独显预算的模型。
+  而且它共享系统内存，能承载超出独显预算的模型（80B 也能跑，靠 Vulkan + 三层卸载）。
 - **NPU 面向常驻低功耗**，不是吞吐：6.4 tok/s，但功耗只有零头。
   它没有独立显存，因此走 SSD + 内存两层分片。
 - **CPU 上 prefill 与 decode 差距悬殊。** CPU 对提示词处理做了良好向量化
   （198–283 tok/s），但每生成一个 token 都受内存带宽限制，所以 decode 只有 4.5 tok/s。
+- **核显/Vulkan 路径的取舍**：I 卡跑 8B 时 Vulkan（140/9.2）**慢于** OpenVINO
+  （1298/12.0）——OpenVINO 是 Intel 的原生优化路径；但 80B 没有 OpenVINO IR 版，
+  此时 Vulkan + `--n-cpu-moe` 是唯一可行解。
 
 ---
 
@@ -382,6 +414,11 @@ cargo test                          # Rust 内核单测
 # 性能复现
 python scripts/bench_llama.py models/qwen3-8b-gguf/Qwen3-8B-Q4_K_M.gguf --ngl 999
 python scripts/bench_ov.py models/qwen3-8b-int4-cw-ov NPU
+
+# 80B 三层卸载
+EDGE_LLAMA_DIR=D:/AI/tools/llama D:/AI/tools/llama/llama-bench.exe \
+  -m models/qwen3-next-80b-a3b-instruct-gguf/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf \
+  -ngl 999 -ncmoe 48 -p 512 -n 128 -r 2
 ```
 
 ---

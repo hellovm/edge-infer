@@ -746,6 +746,10 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
         "max_tokens": req.max_tokens,
         "temperature": req.temperature,
         "stream": True,
+        # Ask llama-server for real token counts + timings in the final chunk,
+        # instead of estimating from character counts (which badly misreports
+        # slow models -- e.g. an 80B MoE looked like 0.36 tok/s).
+        "stream_options": {"include_usage": True},
     }).encode()
 
     r = urllib.request.Request(
@@ -757,6 +761,8 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     t0 = time.time()
     nchars = 0
     in_think = False  # currently inside a think block
+    server_usage = None
+    timings = None
     with urllib.request.urlopen(r, timeout=600) as resp:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -767,7 +773,14 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
                 break
             try:
                 obj = _j.loads(data)
-                d = obj["choices"][0].get("delta", {})
+                if obj.get("usage"):
+                    server_usage = obj["usage"]
+                if obj.get("timings"):
+                    timings = obj["timings"]
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                d = choices[0].get("delta", {})
                 # llama-server reports reasoning separately in
                 # `reasoning_content` (Qwen3 / MiniCPM-V-4.5). Some models
                 # also echo the literal markers inside the text -- strip them.
@@ -798,14 +811,31 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     if in_think:
         yield frame(T_CLOSE)
     dt = max(time.time() - t0, 1e-3)
-    comp = max(nchars // 2, 1)
-    yield frame("", finish="stop", usage={
-        "prompt_tokens": max(len(user) // 2, 1),
-        "completion_tokens": comp,
-        "total_tokens": max(len(user) // 2, 1) + comp,
-        "est_tok_s": round(comp / dt, 2),
+
+    # Prefer llama-server's own measurements; fall back to the char estimate.
+    if server_usage:
+        p_tok = int(server_usage.get("prompt_tokens") or 0)
+        c_tok = int(server_usage.get("completion_tokens") or 0)
+    else:
+        p_tok = max(len(user) // 2, 1)
+        c_tok = max(nchars // 2, 1)
+    if timings and timings.get("predicted_per_second"):
+        est = float(timings["predicted_per_second"])
+    else:
+        est = c_tok / dt
+    usage = {
+        "prompt_tokens": p_tok,
+        "completion_tokens": c_tok,
+        "total_tokens": p_tok + c_tok,
+        "est_tok_s": round(est, 2),
         "device": "llama.cpp",
-    })
+    }
+    if timings:
+        if timings.get("prompt_per_second"):
+            usage["prefill_tok_s"] = round(float(timings["prompt_per_second"]), 2)
+        if timings.get("prompt_ms") is not None:
+            usage["ttft_ms"] = round(float(timings["prompt_ms"]), 1)
+    yield frame("", finish="stop", usage=usage)
 
 
 @app.post("/v1/chat/completions")
