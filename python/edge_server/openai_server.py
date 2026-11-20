@@ -716,6 +716,13 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     import json as _j
     import urllib.request
 
+    # Think markers are assembled from char codes on purpose: written as
+    # literals they keep getting mangled by tooling that eats "<...>",
+    # which silently breaks the GUI think-block parser.
+    _LT, _GT = chr(60), chr(62)
+    T_OPEN = _LT + "think" + _GT
+    T_CLOSE = _LT + "/think" + _GT
+
     want_think = bool(getattr(req, "enable_thinking", False))
     if not _llama.running() or (_llama._cfg and (
             _llama._cfg.model_path != gguf_path or _llama._cfg.reasoning != want_think)):
@@ -749,6 +756,7 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     )
     t0 = time.time()
     nchars = 0
+    in_think = False  # currently inside a think block
     with urllib.request.urlopen(r, timeout=600) as resp:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -760,21 +768,35 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
             try:
                 obj = _j.loads(data)
                 d = obj["choices"][0].get("delta", {})
-                # llama-server puts Qwen3 thinking in `reasoning_content`.
-                # Thinking OFF → drop it (else it leaks into the answer as
-                # visible text). Thinking ON → wrap in  thinking…</think> so the
-                # GUI can collapse it.
-                content = d.get("content") or ""
-                reasoning = d.get("reasoning_content") or ""
-                if reasoning and getattr(req, "enable_thinking", False):
-                    delta = " thinking" + reasoning + "</think>"
-                else:
-                    delta = content
+                # llama-server reports reasoning separately in
+                # `reasoning_content` (Qwen3 / MiniCPM-V-4.5). Some models
+                # also echo the literal markers inside the text -- strip them.
+                content = (d.get("content") or "")
+                reasoning = (d.get("reasoning_content") or "")
+                for _tag in (T_OPEN, T_CLOSE):
+                    content = content.replace(_tag, "")
+                    reasoning = reasoning.replace(_tag, "")
+
+                delta = ""
+                if reasoning and want_think:
+                    if not in_think:
+                        delta += T_OPEN
+                        in_think = True
+                    delta += reasoning
+                # Thinking off -> drop the reasoning; it would otherwise leak
+                # into the visible answer as plain text.
+                if content:
+                    if in_think:
+                        delta += T_CLOSE
+                        in_think = False
+                    delta += content
             except Exception:
                 continue
             if delta:
                 nchars += len(delta)
                 yield frame(delta)
+    if in_think:
+        yield frame(T_CLOSE)
     dt = max(time.time() - t0, 1e-3)
     comp = max(nchars // 2, 1)
     yield frame("", finish="stop", usage={
