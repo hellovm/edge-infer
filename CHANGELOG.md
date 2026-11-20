@@ -7,13 +7,7 @@
 
 ## [Unreleased]
 
-### Fixed
-- **思考内容泄漏到正文（llama.cpp 路径）**：开启「思考模式」时，整段推理过程
-  被当作正文显示，并夹杂 `thinking…/think` 字样，「思考过程」折叠框始终为空。
-  根因是 `_llama_stream()` 里开标签被写坏成字面量（丢了 `<` 和 `>`），
-  前端 `splitThink()` 找 `<think` 永远匹配不到。修复：用 `chr(60)/chr(62)`
-  拼接标签（避免工具链再吞尖括号）、改为状态机只输出一对 ` thinking…</think>`、
-  先剥离模型自吐的字面标签、思考关闭时彻底丢弃 `reasoning_content`。
+（暂无）
 
 ## [0.2.1] - 2026-11-20
 
@@ -68,6 +62,12 @@
 - 文档移除第三方产品名，统一为「本地 Agent」表述。
 
 ### Fixed
+- **思考内容泄漏到正文（llama.cpp 路径）**：开启「思考模式」时，整段推理过程
+  被当作正文显示，并夹杂 `thinking…/think` 字样，「思考过程」折叠框始终为空。
+  根因是 `_llama_stream()` 里开标签被写坏成字面量（丢了 `<` 和 `>`），
+  前端 `splitThink()` 找 `<think` 永远匹配不到。修复：用 `chr(60)/chr(62)`
+  拼接标签（避免工具链再吞尖括号）、改为状态机只输出一对 ` thinking…</think>`、
+  先剥离模型自吐的字面标签、思考关闭时彻底丢弃 `reasoning_content`。
 - **思考内容泄漏**：llama.cpp 路径下 Qwen3 的推理过程被当作正文输出，回答里出现
   `im_start` / `im_end` 等特殊标记 → 给 `llama-server` 加
   `--reasoning off --reasoning-format deepseek`，思考块不再混入正文。
