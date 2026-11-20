@@ -429,6 +429,43 @@ def edge_run_plan(context: int = 8192, large_threshold_gb: int = 8):
         return _json.loads(out.stdout)
 
 
+def _dir_state(d: str) -> str:
+    """Classify a models/ subdir: 'ready' | 'downloading' | 'empty'.
+
+    A dir counts as **ready** only when it holds usable weights: a non-empty
+    ``*.gguf``, or the OpenVINO IR pair (``openvino_model.xml`` +
+    ``openvino_model.bin`` / ``openvino_language_model.xml``). While a download
+    is in flight ModelScope leaves ``*.incomplete`` files, which we treat as
+    'downloading' so the UI doesn't claim the model is installed.
+    """
+    try:
+        entries = os.listdir(d)
+    except OSError:
+        return "empty"
+    if not entries:
+        return "empty"
+
+    has_incomplete = any(e.endswith((".incomplete", ".part", ".tmp")) for e in entries)
+    if has_incomplete:
+        return "downloading"
+
+    # GGUF: any real .gguf (weights, ignoring the tiny mmproj projector)
+    ggufs = [e for e in entries if e.endswith(".gguf")]
+    weights = [e for e in ggufs if "mmproj" not in e.lower()]
+    if weights:
+        # .gguf files are downloaded via ModelScope's own temp names, so a
+        # present .gguf means it finished.
+        return "ready"
+
+    # OpenVINO IR: xml + matching bin
+    for xml in ("openvino_model.xml", "openvino_language_model.xml"):
+        if os.path.exists(os.path.join(d, xml)):
+            base = xml[:-4]
+            if os.path.exists(os.path.join(d, base + ".bin")):
+                return "ready"
+    return "downloading" if ggufs or os.path.exists(os.path.join(d, "openvino_config.json")) else "empty"
+
+
 @app.get("/edge/catalog")
 def edge_catalog(device: Optional[str] = None):
     """Recommended models, one entry per model with a variant per device.
@@ -439,9 +476,12 @@ def edge_catalog(device: Optional[str] = None):
     try:
         from .model_catalog import MODELS, DEVICE_LABELS, resolve_device
 
+        # Only dirs with complete weights count as installed.
         installed = set()
         if os.path.isdir(_MODELS_DIR):
-            installed = set(os.listdir(_MODELS_DIR))
+            for name in os.listdir(_MODELS_DIR):
+                if _dir_state(os.path.join(_MODELS_DIR, name)) == "ready":
+                    installed.add(name)
 
         def _norm(s: str) -> str:
             return s.lower().replace("-", "").replace("_", "").replace(".", "")
@@ -513,11 +553,12 @@ def edge_models():
             if not os.path.isdir(d):
                 continue
             kind = _model_kind(d)          # gguf | llm | vlm | unknown
+            state = _dir_state(d)          # ready | downloading | empty
             label = {
                 "gguf": "GGUF (llama.cpp)",
                 "llm": "OpenVINO IR (LLM)",
                 "vlm": "OpenVINO IR (VLM)",
-            }.get(kind, "其他")
+            }.get(kind, "下载中" if state == "downloading" else "其他")
             # Which *devices this machine actually has* can run this model?
             # (Only list hardware that's present, so the GUI badge is honest.)
             npu_ok = _npu_compatible(d, kind)
@@ -545,6 +586,8 @@ def edge_models():
                 "id": name,
                 "note": label,
                 "kind": kind,
+                "state": state,            # ready | downloading | empty
+                "usable": state == "ready",
                 "size": f"{size / 1e9:.2f} GB",
                 "size_gb": round(size / 1e9, 2),
                 "path": d,

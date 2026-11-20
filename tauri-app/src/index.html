@@ -503,7 +503,6 @@ function readText(f){ return new Promise(res=>{ const r=new FileReader(); r.onlo
 function readDataURL(f){ return new Promise(res=>{ const r=new FileReader(); r.onload=()=>res(String(r.result)); r.onerror=()=>res(""); r.readAsDataURL(f); }); }
 
 function toggleAttMenu(e){ if(e) e.stopPropagation(); const m=$("attMenu"); m.classList.toggle("show"); $("plusBtn").classList.toggle("on",m.classList.contains("show")); }
-function toggleModelMenu(e){ if(e) e.stopPropagation(); const m=$("modelMenu"); m.classList.toggle("show"); }
 document.addEventListener("click",e=>{
   if(!e.target.closest("#attMenu") && !e.target.closest("#plusBtn")){ $("attMenu").classList.remove("show"); $("plusBtn").classList.remove("on"); }
   if(!e.target.closest("#modelMenu") && !e.target.closest("#modelPickBtn")) $("modelMenu").classList.remove("show");
@@ -540,7 +539,10 @@ let MODELS=[];
 async function loadModelsForPicker(){
   try{ const j=await (await fetch(API+"/edge/models")).json(); MODELS=j.models||[]; }
   catch(e){ MODELS=[]; }
-  if(!state.modelId && MODELS.length) state.modelId=MODELS[0].id;
+  // 只把「已就绪」的模型作为默认选中项
+  const ready=MODELS.filter(m=>m.usable!==false);
+  if(state.modelId && !ready.some(m=>m.id===state.modelId)) state.modelId=null;
+  if(!state.modelId && ready.length) state.modelId=ready[0].id;
   refreshModelPick();
 }
 function modelById(id){ return MODELS.find(m=>m.id===id); }
@@ -568,10 +570,20 @@ function frontendDevKey(){
 function toggleModelMenuPane(){
   const box=$("modelMenu"); box.classList.toggle("show");
   if(!box.classList.contains("show")) return;
-  if(!MODELS.length){ box.innerHTML='<div class="grp">无本地模型</div>'; return; }
+  renderModelMenu();
+  // 每次打开都后台刷新一次（服务可能刚起来，之前加载失败过）
+  loadModelsForPicker().then(renderModelMenu);
+}
+function renderModelMenu(){
+  const box=$("modelMenu"); if(!box||!box.classList.contains("show")) return;
+  const ready=MODELS.filter(m=>m.usable!==false);
+  if(!ready.length){
+    box.innerHTML='<div class="grp">无可用模型</div><div style="padding:6px 10px;font-size:11.5px;color:var(--dim)">请到「菜单 → 模型」下载一个模型</div>';
+    return;
+  }
   const devKey=frontendDevKey();
   const fits=(m)=>!devKey || (m.devices||[]).includes(devKey);
-  box.innerHTML = MODELS.map(m=>{
+  box.innerHTML = ready.map(m=>{
     const ok=fits(m);
     const badge=deviceBadge(m);
     const badgeFull=deviceBadge(m,true);
@@ -928,8 +940,13 @@ async function runPlan(){
 }
 async function loadModels(){ try{ const j=await (await fetch(API+"/edge/models")).json(); const box=$("modelList");
   if(!j.models||!j.models.length){ box.innerHTML='<div style="color:var(--dim)">未发现本地模型</div>'; return; }
-  box.innerHTML=j.models.map(m=>{ const b=m.npu_compatible?'<span class="badge b-ram">NPU 可用</span>':'<span class="badge b-ssd">仅 CPU/GPU</span>';
-    return `<div class="frow"><div class="lbl">${esc(m.id)}<small>${esc(m.note)} · ${m.size}</small></div>${b}</div>`; }).join("");
+  box.innerHTML=j.models.map(m=>{
+    let b;
+    if(m.state==="downloading") b='<span class="badge" style="background:rgba(245,158,11,.12);color:var(--warn)">⏳ 下载中</span>';
+    else if(m.usable===false) b='<span class="badge b-ssd">不可用</span>';
+    else b=`<span class="badge b-ram">${esc(m.device_label||'可用')}</span>`;
+    return `<div class="frow"><div class="lbl">${esc(m.id)}<small>${esc(m.note)} · ${m.size}</small></div>${b}</div>`;
+  }).join("");
 }catch(e){ $("modelList").innerHTML='<div style="color:var(--dim)">读取失败：'+esc(e.message)+'</div>'; } }
 
 const DEV_LABEL={nvidia:["NVIDIA GPU","var(--nvidia)","#76b900"],"intel-gpu":["Intel GPU","var(--cpu)","#8b5cf6"],npu:["Intel NPU","var(--npu)","#2f8fff"]};
@@ -964,16 +981,17 @@ function renderCatalog(){
     const actTag=(m.active&&m.active!==m.params)?`<span class="tg">激活 ${m.active}</span>`:'';
     const devTag=`<span class="tg tgdev">${esc(v.device_label)}</span>`;
     const dl=_DOWNLOADS[v.repo];
-    const running = dl && dl.state==="running";
+    const running = (dl && dl.state==="running") || v.state==="downloading";
     const done = v.installed || (dl && dl.state==="done");
     const err = dl && dl.state==="error";
     let btn;
-    if(running) btn=`<button class="btn" disabled style="margin-top:9px;width:100%">下载中…</button>`;
+    if(running) btn=`<button class="btn" disabled style="margin-top:9px;width:100%">⏳ 下载中…</button>`;
     else if(done) btn=`<button class="btn" disabled style="margin-top:9px;width:100%;color:var(--ok)">✓ 已下载（${v.size_gb} GB）</button>`;
     else btn=`<button class="btn primary" style="margin-top:9px;width:100%" onclick="dlVariant('${esc(v.repo)}','${filesAttr}',this)">下载 ${v.size_gb} GB</button>`;
     const others=m.variants.length>1?`<div class="alt">其它设备格式：${m.variants.filter(x=>x!==v).map(x=>`<a onclick="event.stopPropagation();dlVariant('${esc(x.repo)}','${x.files?esc(x.files.join(",")):""}')">${esc(x.device_label)}（${esc(x.quant)}）</a>`).join("、")}</div>`:"";
+    const corner = done?'<span class="installed">✓ 已下载</span>' : (running?'<span class="installed" style="color:var(--warn)">⏳ 下载中</span>':'');
     return `<div class="mcard2">
-      ${done?'<span class="installed">✓ 已下载</span>':''}
+      ${corner}
       <div class="mt">${esc(m.name)}</div>
       <div class="mtags"><span class="tg">${m.params}</span>${actTag}<span class="tg">${v.quant}</span><span class="tg">${v.size_gb} GB</span>${devTag}${mmTag}</div>
       <div class="mh">🧩 推荐规格：${esc(v.ram_hint||"")}</div>
