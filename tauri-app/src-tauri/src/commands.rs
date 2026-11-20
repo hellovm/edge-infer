@@ -1,12 +1,29 @@
 //! Tauri commands. Kept in a dedicated module so the `#[tauri::command]`
 //! generated macros don't collide at the crate root.
 
+use crate::sidecar::{ensure_server, service_up, ServerProc};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+use tauri::State;
 
 const EDGE_DETECT: &str = "edge-detect.exe";
 const EDGE_ENGINE: &str = "edge-engine.exe";
 const OPENAI_BASE: &str = "http://127.0.0.1:8080";
+
+#[tauri::command]
+pub fn start_service(proc: State<'_, ServerProc>) -> Result<serde_json::Value, String> {
+    let launched = ensure_server(&proc)?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "launched": launched,
+        "up": service_up(),
+    }))
+}
+
+#[tauri::command]
+pub fn service_status() -> serde_json::Value {
+    serde_json::json!({ "up": service_up() })
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ProbeJson {

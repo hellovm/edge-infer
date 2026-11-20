@@ -7,14 +7,50 @@
 
 ## [Unreleased]
 
-### Planned
-- Intel Arc iGPU 后端（Vulkan / SYCL）
-- 100B+ MoE 分层参数支持
-- Tauri 安装包（NSIS / WiX）
+v0.2.0 之后的增量（版本号待正式发布时再定）。
+
+### Added
+- **一键启动**：Tauri 原生窗口启动时自动定位项目根目录与 Python 解释器，
+  后台拉起 `uvicorn` 推理服务（TCP 健康探测，就绪后通知前端）；普通用户
+  双击 exe 即用，无需手动运行 `run_server.py`。
+- **进程生命周期管理**：关闭窗口时结束子进程；即使被强制结束，Python 端的
+  **父进程看门狗**（`EDGE_PARENT_PID`）也会在数秒内自我退出，不留残留进程。
+- 新增 Tauri 命令 `start_service` / `service_status`（供前端手动重试）。
+- GUI 启动状态提示：「正在启动推理服务…」→ 就绪 / 失败可点击重试。
+- **模型推荐目录**（`model_catalog.py`）：NVIDIA / Intel GPU / Intel NPU 各
+  2 个多模态模型（一大一小），标注参数量、量化方式、体积与内存建议；
+  新增 `/edge/catalog` 端点（含已安装标记），点击卡片直接下载。
+- **运行时设备切换**：`/edge/device/set`、`/edge/device/current`，
+  NVIDIA GPU / Intel NPU / CPU / AUTO 真正生效。
+- **思考模式开关**：关闭时过滤 `think` 块，开启时以折叠框展示思考过程。
+- 对话区显示 **token 数 / tok-s / 推理设备**。
+- 历史对话**归档 / 取消归档 / 删除**（可连带删除关联项目文件夹）。
+- 输入框**附件上传**（文本内容随请求注入，`/agent/upload`）。
+- 「关于」页开发者信息。
+- 实测：NPU 可跑 9B 多模态（MiniCPM-V-4.5 `int4-cw`，对称量化 + `VLMPipeline`），
+  首次加载含编译约 50s。
+
+### Changed
+- 布局重构：右侧专注对话，项目 / Agent / 三层方案 / 模型 / 设置收入左下角菜单弹层。
+- `run_windows.bat` 简化为「优先启动原生窗口」；无原生窗口时回退「服务 + 浏览器」。
+- 文档移除第三方产品名，统一为「本地 Agent」表述。
+
+### Fixed
+- **Tauri 前端误判服务离线**（核心 bug）：页面源 `http://tauri.localhost` 的
+  asset server 对未知路径（如 `/health`）会 fallback 返回 `index.html`
+  （HTTP 200 + HTML）。此前只检查 `r.ok`，误把它当作有效 API，导致后续请求
+  拿到 HTML 解析失败、界面显示「服务未运行」。现改为**校验响应为 JSON 且
+  `ok === true`**，并显式跳开 Tauri/file 资产源；`loadHealth` 失败时会自动
+  重新探测 API 地址。
+- **删除对话后界面残留**：空态原本用 `$("chatEmpty").outerHTML` 获取，但该元素
+  首次渲染即被 `innerHTML` 覆盖销毁导致取不到；改为函数生成空态，
+  删除当前对话后自动切到最近对话，无对话则新建空对话并清空输入框。
+- 流式结束后「Agent 运行中」状态残留；SSE 末帧补齐 usage（token / tok-s / 设备）。
+- 模型列表 NPU 兼容性判断错误（LLM IR 用 `openvino_model.xml`）。
 
 ## [0.2.0] - 2026-11-20
 
-项目化 Agent 工作流：把"单一沙箱"升级为多项目开发环境。
+项目化 Agent 工作流：把「单一沙箱」升级为多项目开发环境。
 
 ### Added
 - **项目管理**：`create_project` / `open_project` / `list_projects` 工具，
@@ -54,7 +90,7 @@
   NPU→CPU 自动回退
 - **流式输出**：`/v1/chat/completions` 支持 `stream=true`（OpenAI 兼容 SSE）
 
-**本地 Agent（WorkBuddy 式）**
+**本地 Agent**
 - `agent_tools.py`：文件系统工具（创建任务文件夹、读写文件、搜索、执行命令等），
   带 `workspace/` 沙箱隔离
 - 端点：`/agent/chat`（工具循环）、`/agent/workspace`、`/agent/list`
@@ -63,7 +99,7 @@
 **服务与界面**
 - OpenAI 兼容服务（`openai_server.py`，FastAPI）：`/v1/chat/completions`、
   `/v1/models`、`/health`，支持 API Key 鉴权
-- 类 WorkBuddy 工作台 GUI：会话列表、对话 / Agent 工作区 / 三层方案 / 模型 / 设置
+- 本地 AI 工作台 GUI：会话列表、对话 / Agent 工作区 / 三层方案 / 模型 / 设置
   五视图、设备选择器、推理源切换（本地 / 外接 OpenAI API）
 - Tauri 2 原生窗口（设备选择器 + 对话 + 性能面板）
 - SSD 真实探测（`storage_probe.py`）：CIM 读磁盘型号 + 多线程实测带宽
@@ -78,6 +114,6 @@
 - Tauri windows-gnu 工具链 `dlltool` 缺失 → 改用完整 MinGW-w64
 - Tauri v2 命令宏命名冲突 → 命令移入 `commands.rs` 子模块
 
-[Unreleased]: https://github.com/OWNER/edge-infer/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/OWNER/edge-infer/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/OWNER/edge-infer/releases/tag/v0.1.0
+[Unreleased]: https://github.com/hellovm/-edge-infer/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/hellovm/-edge-infer/releases/tag/v0.2.0
+[0.1.0]: https://github.com/hellovm/-edge-infer/releases/tag/v0.1.0

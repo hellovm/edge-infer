@@ -127,6 +127,9 @@ class ChatRequest(BaseModel):
     max_tokens: int = Field(default=256, ge=1, le=8192)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     stream: bool = False
+    device: Optional[str] = None          # override EDGE_DEVICE per request
+    enable_thinking: bool = False         # Qwen3 thinking mode
+    attachments: List[dict] = []          # [{name, content}] inline text files
 
 
 # ---------------------------------------------------------------------------
@@ -274,9 +277,40 @@ def edge_run_plan(context: int = 8192, large_threshold_gb: int = 8):
         return _json.loads(out.stdout)
 
 
+@app.get("/edge/catalog")
+def edge_catalog():
+    """Curated multimodal model recommendations per accelerator."""
+    try:
+        from .model_catalog import CATALOG
+
+        installed = set()
+        if os.path.isdir(_MODELS_DIR):
+            installed = set(os.listdir(_MODELS_DIR))
+
+        def _norm(s: str) -> str:
+            return s.lower().replace("-", "").replace("_", "").replace(".", "")
+
+        def installed_for(repo: str) -> bool:
+            # repo short name (e.g. MiniCPM-V-4_5-int4-cw-ov) vs local dir
+            # (e.g. minicpm-v-4_5-int4-cw). Match on a normalized core token.
+            short = _norm(repo.split("/")[-1])
+            core = short.replace("ov", "") if short.endswith("ov") else short
+            for n in installed:
+                nn = _norm(n)
+                if nn == short or nn.startswith(core[:14]) or core.startswith(nn[:14]):
+                    return True
+            return False
+
+        out = {}
+        for dev, items in CATALOG.items():
+            out[dev] = [{**it, "installed": installed_for(it["repo"])} for it in items]
+        return {"catalog": out}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"catalog error: {e}")
+
+
 @app.get("/edge/models")
 def edge_models():
-    """List locally installed models under models/."""
     out = []
     if os.path.isdir(_MODELS_DIR):
         for name in sorted(os.listdir(_MODELS_DIR)):
@@ -349,7 +383,17 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
     if not user:
         user = "\n".join(m.content for m in req.messages)
 
+    # Fold attachments (inline text files) into the prompt.
+    if req.attachments:
+        extra = []
+        for a in req.attachments:
+            name = a.get("name", "file")
+            content = a.get("content", "")
+            extra.append(f"\n\n[附件 {name}]\n{content[:6000]}")
+        user = user + "".join(extra)
+
     model_ok = os.path.isdir(DEFAULT_MODEL_DIR)
+    dev = req.device or DEFAULT_DEVICE
 
     def _degrade_text() -> str:
         prompt = "\n".join(f"{m.role}: {m.content}" for m in req.messages)
@@ -372,33 +416,46 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
             cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
             created = int(time.time())
 
-            def frame(delta: str, finish=None) -> str:
-                return sse({
+            def frame(delta: str, finish=None, usage=None) -> str:
+                obj = {
                     "id": cid, "object": "chat.completion.chunk",
                     "created": created, "model": req.model,
                     "choices": [{"index": 0, "delta": ({"content": delta} if delta else {}),
                                  "finish_reason": finish}],
-                })
+                }
+                if usage:
+                    obj["usage"] = usage
+                return sse(obj)
 
             use_genai = _GENAI_AVAILABLE and model_ok and is_llm_dir(DEFAULT_MODEL_DIR)
             try:
                 if use_genai:
                     _genai.load(
-                        DEFAULT_MODEL_DIR, device=DEFAULT_DEVICE,
-                        cache_dir=os.path.join(DEFAULT_MODEL_DIR, ".npu_cache", DEFAULT_DEVICE),
+                        DEFAULT_MODEL_DIR, device=dev,
+                        cache_dir=os.path.join(DEFAULT_MODEL_DIR, ".npu_cache", dev),
                     )
+                    t0 = time.time()
+                    nchars = 0
                     got = False
                     for delta in _genai.stream_chat(
                         user, system=system, max_new_tokens=req.max_tokens,
-                        temperature=req.temperature,
+                        temperature=req.temperature, enable_thinking=req.enable_thinking,
                     ):
                         got = True
+                        nchars += len(delta)
                         yield frame(delta)
                     if not got:
                         yield frame("")
-                    yield frame("", finish="stop")
+                    dt = max(time.time() - t0, 1e-3)
+                    comp = max(nchars // 2, 1)   # CJK ~2 chars/token
+                    yield frame("", finish="stop", usage={
+                        "prompt_tokens": max(len(user) // 2, 1),
+                        "completion_tokens": comp,
+                        "total_tokens": max(len(user) // 2, 1) + comp,
+                        "est_tok_s": round(comp / dt, 2),
+                        "device": _genai._device or dev,
+                    })
                 else:
-                    # Non-streaming backends: emit the whole answer as one chunk.
                     text = _degrade_text()
                     if _GEN_AVAILABLE and model_ok:
                         try:
@@ -417,18 +474,18 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     # ---- non-streaming ----
-    # Prefer the NPU/GenAI LLMPipeline path when the model is a plain LLM IR.
     if _GENAI_AVAILABLE and model_ok and is_llm_dir(DEFAULT_MODEL_DIR):
         try:
             _genai.load(
                 DEFAULT_MODEL_DIR,
-                device=DEFAULT_DEVICE,
-                cache_dir=os.path.join(DEFAULT_MODEL_DIR, ".npu_cache", DEFAULT_DEVICE),
+                device=dev,
+                cache_dir=os.path.join(DEFAULT_MODEL_DIR, ".npu_cache", dev),
             )
             r = _genai.chat(
                 user, system=system,
                 max_new_tokens=req.max_tokens,
                 temperature=req.temperature,
+                enable_thinking=req.enable_thinking,
             )
             return _resp(req.model, r.text, prompt_tokens=r.prompt_tokens,
                          completion_tokens=r.completion_tokens, tok_s=r.est_tok_s,
@@ -632,6 +689,67 @@ def agent_sandbox_run(cmd: str):
     return {"ok": True, "output": _ws.sandbox_run(cmd)}
 
 
+@app.post("/project/delete")
+def project_delete(name: str):
+    """Delete a project folder (and everything in it). Confined to workspace."""
+    if not _AGENT_AVAILABLE:
+        raise HTTPException(503, "agent tools unavailable")
+    import shutil as _sh
+
+    base = (_ws._projects_dir() / name).resolve()
+    try:
+        base.relative_to(_ws.root)
+    except ValueError:
+        raise HTTPException(400, "path escapes workspace")
+    if not base.is_dir():
+        raise HTTPException(404, f"project not found: {name}")
+    _sh.rmtree(base, ignore_errors=True)
+    # if we were inside the deleted project, reset to workspace root
+    try:
+        _ws.current.relative_to(base)
+        _ws.current = _ws.root
+    except ValueError:
+        pass
+    return {"ok": True, "message": f"已删除项目 {name}"}
+
+
+class AttachmentReq(BaseModel):
+    name: str
+    content: str
+
+
+@app.post("/agent/upload")
+def agent_upload(req: AttachmentReq):
+    """Save an uploaded attachment into the workspace's uploads/ dir."""
+    if not _AGENT_AVAILABLE:
+        raise HTTPException(503, "agent tools unavailable")
+    updir = _ws.root / "uploads"
+    updir.mkdir(parents=True, exist_ok=True)
+    safe = os.path.basename(req.name) or "file.txt"
+    (updir / safe).write_text(req.content, encoding="utf-8")
+    return {"ok": True, "path": f"uploads/{safe}", "message": f"已保存附件 {safe}"}
+
+
+@app.post("/edge/device/set")
+def edge_device_set(device: str):
+    """Switch the inference device at runtime (unloads the current pipeline)."""
+    global DEFAULT_DEVICE
+    DEFAULT_DEVICE = device
+    if _genai is not None:
+        try:
+            _genai.unload()
+        except Exception:  # noqa: BLE001
+            pass
+    return {"ok": True, "device": DEFAULT_DEVICE,
+            "message": f"已切换设备为 {device}（下次推理生效）"}
+
+
+@app.get("/edge/device/current")
+def edge_device_current():
+    return {"device": DEFAULT_DEVICE,
+            "loaded_on": (_genai._device if _genai else None)}
+
+
 @app.post("/project/sandbox_setup")
 def project_sandbox_setup():
     if not _AGENT_AVAILABLE:
@@ -686,10 +804,53 @@ def _strip_think(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# parent-process watchdog (auto-exit when the GUI dies)
+# ---------------------------------------------------------------------------
+def _start_parent_watchdog() -> None:
+    """Exit this process when EDGE_PARENT_PID is gone.
+
+    When the Tauri GUI is force-killed, the child Python process would
+    otherwise linger. Poll the parent and shut down cleanly once it disappears.
+    """
+    ppid = os.environ.get("EDGE_PARENT_PID")
+    if not ppid:
+        return
+    try:
+        ppid_i = int(ppid)
+    except ValueError:
+        return
+
+    import threading
+
+    def _watch():
+        import time as _t
+        while True:
+            _t.sleep(3)
+            if not _pid_alive(ppid_i):
+                os._exit(0)
+
+    threading.Thread(target=_watch, daemon=True).start()
+
+
+def _pid_alive(pid: int) -> bool:
+    import subprocess as _sp
+    try:
+        if os.name == "nt":
+            out = _sp.run(["tasklist", "/FI", f"PID eq {pid}"],
+                          capture_output=True, text=True, timeout=5, errors="replace")
+            return str(pid) in (out.stdout or "")
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # entrypoint
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
 
+    _start_parent_watchdog()
     uvicorn.run(app, host="0.0.0.0", port=8080)
 

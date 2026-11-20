@@ -7,11 +7,12 @@
     "frontendDist": "../src"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "edge-infer · 三层卸载多硬件推理平台",
-        "width": 960,
-        "height": 680,
+        "width": 1100,
+        "height": 760,
         "resizable": true
       }
     ],

@@ -58,14 +58,32 @@ class GenaiBackend:
     def available(self) -> bool:
         return _GENAI_AVAILABLE
 
+    def unload(self) -> None:
+        """Drop the current pipeline so the next request can pick a new device."""
+        self._pipe = None
+        self._device = None
+        self._model_dir = None
+
     def load(self, model_dir: str, device: str = "NPU", cache_dir: Optional[str] = None):
         """Load (or reuse) the pipeline for `model_dir` on `device`.
 
-        Falls back to CPU if the NPU compile fails (e.g. asymmetric weights).
+        Device string can be "NPU" / "CPU" / "GPU" / "GPU.0" / "AUTO".
+        Normalizes a few aliases and falls back NPU/GPU -> CPU on failure.
         """
         if not _GENAI_AVAILABLE:
             raise RuntimeError("openvino_genai not installed")
-        if self._pipe is not None and self._model_dir == model_dir and self._device == device:
+
+        # Normalize device aliases from the GUI.
+        alias = {
+            "NVIDIA-GPU": "GPU", "NVIDIA GPU": "GPU", "CUDA": "GPU",
+            "INTEL-GPU": "GPU", "IGPU": "GPU", "GPU.0": "GPU", "GPU.1": "GPU",
+            "NPU": "NPU", "CPU": "CPU",
+        }
+        d = device.upper() if isinstance(device, str) else str(device)
+        dev = alias.get(d, "AUTO" if d in ("AUTO", "自动选择", "") else d)
+
+        # Reuse only if same model AND same device.
+        if self._pipe is not None and self._model_dir == model_dir and self._device == dev:
             return self._pipe
 
         kwargs = {}
@@ -74,9 +92,10 @@ class GenaiBackend:
             kwargs["CACHE_DIR"] = cache_dir
 
         try:
-            self._pipe = ov_genai.LLMPipeline(model_dir, device, **kwargs)
-            self._device = device
+            self._pipe = ov_genai.LLMPipeline(model_dir, dev, **kwargs)
+            self._device = dev
         except Exception:
+            # NPU/GPU compile failed -> retry on CPU.
             self._pipe = ov_genai.LLMPipeline(model_dir, "CPU", **kwargs)
             self._device = "CPU"
         self._model_dir = model_dir
