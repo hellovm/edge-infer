@@ -84,16 +84,26 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 _NVIDIA_DEVICE_IDS: set = set()
 _INTEL_GPU_DEVICE_IDS: set = set()
 _NVIDIA_AVAILABLE = False
+_NPU_AVAILABLE = False
 
 
 def _probe_gpu_ids() -> None:
-    """Classify OpenVINO's GPU.* ids into NVIDIA (discrete) vs Intel (integrated)."""
-    global _NVIDIA_AVAILABLE
+    """Classify OpenVINO's GPU.* ids into NVIDIA (discrete) vs Intel (integrated).
+
+    Also records whether an ``NPU`` is present. OpenVINO's NPU plugin targets
+    **Intel** NPUs (VPU3720/4000) only -- an AMD XDNA / Ryzen AI NPU is *not*
+    enumerated here, so ``_NPU_AVAILABLE`` stays False on AMD and callers must
+    fall back to CPU instead of pretending the NPU exists.
+    """
+    global _NVIDIA_AVAILABLE, _NPU_AVAILABLE
     try:
         import openvino as ov
 
         core = ov.Core()
         for d in core.get_available_devices():
+            if d.upper() == "NPU":
+                _NPU_AVAILABLE = True
+                continue
             if not d.startswith("GPU"):
                 continue
             name = ""
@@ -117,25 +127,36 @@ def _probe_gpu_ids() -> None:
 _probe_gpu_ids()
 
 
+def _norm_dev(dev: Optional[str]) -> str:
+    """Normalise a device alias: upper-case, strip spaces / underscores / hyphens.
+
+    ``"NVIDIA GPU"``, ``"nvidia_gpu"`` and ``"NVIDIA-GPU"`` all collapse to
+    ``"NVIDIAGPU"`` so aliases written naturally in docs/GUI still route right.
+    (``GPU.0`` / ``GPU.1`` keep their dot.)
+    """
+    return (str(dev or "").upper()
+            .replace(" ", "").replace("_", "").replace("-", ""))
+
+
 def _is_nvidia(dev: Optional[str]) -> bool:
     """True when the requested device explicitly targets the NVIDIA GPU.
 
     Note: ``AUTO`` is intentionally NOT treated as NVIDIA here — auto means
     "pick the best device for the chosen model", which is handled per backend.
     """
-    if not dev:
+    d = _norm_dev(dev)
+    if not d:
         return False
-    d = str(dev).upper().replace(" ", "")
-    if d in ("NVIDIA-GPU", "NVIDIA", "CUDA"):
+    if d in ("NVIDIAGPU", "NVIDIA", "CUDA"):
         return True
     return d in _NVIDIA_DEVICE_IDS
 
 
 def _is_intel_gpu(dev: Optional[str]) -> bool:
-    if not dev:
+    d = _norm_dev(dev)
+    if not d:
         return False
-    d = str(dev).upper().replace(" ", "")
-    if d in ("INTEL-GPU", "IGPU", "INTELGPU"):
+    if d in ("INTELGPU", "IGPU"):
         return True
     if d == "AUTO":
         return False
@@ -147,18 +168,21 @@ def _ov_device(dev: Optional[str], model_kind: str) -> str:
 
     NVIDIA has no fast OpenVINO path (measured ~20× slower than CUDA), so an
     IR model requested on NVIDIA falls back to CPU rather than pretending.
+    Likewise an ``NPU`` request on a machine without an **Intel** NPU (e.g. an
+    AMD XDNA / Ryzen AI box, which OpenVINO does not enumerate) falls back to
+    CPU instead of erroring out.
     """
-    d = (dev or "").upper().replace(" ", "")
+    d = _norm_dev(dev)
     if d == "NPU":
-        return "NPU"
-    if d in ("INTEL-GPU", "IGPU", "INTELGPU") or d in _INTEL_GPU_DEVICE_IDS:
+        return "NPU" if _NPU_AVAILABLE else "CPU"
+    if d in ("INTELGPU", "IGPU") or d in _INTEL_GPU_DEVICE_IDS:
         return "GPU.0"
-    if d in ("NVIDIA-GPU", "NVIDIA", "CUDA") or d in _NVIDIA_DEVICE_IDS:
+    if d in ("NVIDIAGPU", "NVIDIA", "CUDA") or d in _NVIDIA_DEVICE_IDS:
         return "CPU"        # OpenVINO on NVIDIA is not the fast path
     if d in ("CPU",):
         return "CPU"
     # AUTO / empty: best OpenVINO device for the model kind.
-    if model_kind == "llm" and "NPU" in _ov_devices():
+    if model_kind == "llm" and _NPU_AVAILABLE:
         return "NPU"
     if any(x.startswith("GPU") for x in _ov_devices()):
         return "GPU.0"
@@ -327,10 +351,17 @@ def edge_devices():
     devs = core.get_available_devices()
     is_llm = bool(is_llm_dir(DEFAULT_MODEL_DIR)) if is_llm_dir else False
     ssd = _probe_ssd()
+    # Requested device is only honoured when the hardware is actually present
+    # (OpenVINO's NPU plugin is Intel-only, so AMD XDNA falls back to CPU).
+    want = DEFAULT_DEVICE
+    if want == "NPU" and not _NPU_AVAILABLE:
+        want = "CPU"
     return {
         "openvino_devices": devs,
+        "npu_available": _NPU_AVAILABLE,
+        "npu_vendor": "Intel" if _NPU_AVAILABLE else None,
         "small_model_tier": {
-            "device": DEFAULT_DEVICE if DEFAULT_DEVICE in devs else "CPU",
+            "device": want if want in devs else "CPU",
             "model": os.path.basename(DEFAULT_MODEL_DIR),
             "available": os.path.isdir(DEFAULT_MODEL_DIR),
             "npu_compatible": is_llm,
@@ -564,7 +595,7 @@ def edge_models():
             npu_ok = _npu_compatible(d, kind)
             devices = []
             if kind in ("llm", "vlm"):
-                if npu_ok:
+                if npu_ok and _NPU_AVAILABLE:
                     devices.append("NPU")
                 if any(x.startswith("GPU") for x in _INTEL_GPU_DEVICE_IDS) or any(
                     x.startswith("GPU") for x in _ov_devices()

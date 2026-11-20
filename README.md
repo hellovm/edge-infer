@@ -33,15 +33,14 @@
   |---|---|---|
   | NVIDIA GPU (RTX 4070 Laptop) | **llama.cpp CUDA** | **43.3** |
   | Intel GPU (Arc iGPU) | OpenVINO (GPU.0) | 12.0 |
-  | Intel NPU (AI Boost) | OpenVINO (NPU) | 6.4 |
-  | CPU | llama.cpp | 4.5 |
-  | CPU | OpenVINO | 3.5 |
-  | NVIDIA via OpenVINO (GPU.1) | （不推荐） | 2.3 ← 慢约 19× |
+  | Intel NPU (AI Boost · Core Ultra 7 155H) | OpenVINO (NPU) | 6.4 |
 
-  关键结论：**OpenVINO 的 GPU 插件面向 Intel 优化，把 N 卡交给它等于浪费约 19 倍性能**。
-  因此 N 卡一律走 llama.cpp CUDA，Intel GPU / NPU 走 OpenVINO。
+  关键结论：**OpenVINO 的 GPU 插件面向 Intel 优化，把 N 卡交给它等于浪费约 19 倍性能**
+  （实测 decode 2.3 vs 43.3 tok/s）。因此 N 卡一律走 llama.cpp CUDA，
+  Intel GPU / NPU 走 OpenVINO。
   **超大 MoE（80B-A3B）在 8 GB 显存上靠 `--n-cpu-moe` 三层卸载也能跑：N 卡 decode 9.5 tok/s。**
-  （完整的 prefill / decode、`ncmoe` 扫描与测试条件见 [性能实测](#-性能实测)。）
+  （完整的 prefill / decode、CPU 与 Vulkan 对照、`ncmoe` 扫描与测试条件见
+  [性能实测](#-性能实测)。）
 
 - **同一模型按设备自动匹配格式** — 模型目录按「模型 → 变体」组织：同一个模型名下
   挂 `nvidia` / `intel-gpu` / `npu` 多套变体，选中硬件后自动取对应格式
@@ -116,16 +115,17 @@ Unsupported DynamicDequantizeOp configuration:
 
 | 后端 · 设备 | Prefill tok/s | **Decode tok/s** | 相对倍率 |
 |---|---|---|---|
-| llama.cpp CUDA · RTX 4070 8 GB | 2381.8 | **43.3** | 1.00× |
+| llama.cpp CUDA · NVIDIA RTX 4070 Laptop 8 GB | 2381.8 | **43.3** | 1.00× |
 | OpenVINO · Intel Arc iGPU | 1297.7 | 12.0 | 慢 3.6× |
-| OpenVINO · Intel NPU | 35.0 | 6.4 | 慢 6.8× |
-| llama.cpp · CPU（16 线程） | 198.7 | 4.5 | 慢 9.6× |
-| OpenVINO · CPU | 283.3 | 3.5 | 慢 12.4× |
-| OpenVINO · NVIDIA（GPU.1） | 26.2 | **2.3** | **慢 18.8×** |
+| OpenVINO · Intel NPU（AI Boost · Core Ultra 7 155H） | 35.0 | 6.4 | 慢 6.8× |
 
 测法：`llama-bench`（`-p 512 -n 128`，3 次取优）与 `scripts/bench_ov.py`
 （531 token 提示词、生成 128 token、2 次取优）。Prefill = 提示词处理，
 decode = 稳态生成。
+
+> 另外两路对照（同为 Qwen3-8B，未计入主表）：**CPU** 上 llama.cpp 198.7 / 4.5、
+> OpenVINO 283.3 / 3.5 tok/s；**NVIDIA 经 OpenVINO（GPU.1）** 仅 26.2 / 2.3 tok/s，
+> 比 CUDA 慢约 19×，故不推荐。
 
 ### 超大 MoE 三层卸载（重点）
 
@@ -162,10 +162,8 @@ decode = 稳态生成。
   OpenVINO 的 GPU 插件是为 Intel 芯片打造的。
 - **Intel Arc 核显是非 N 卡里的最强选项** —— prefill 只比 4070 慢 1.8×，
   而且它共享系统内存，能承载超出独显预算的模型（80B 也能跑，靠 Vulkan + 三层卸载）。
-- **NPU 面向常驻低功耗**，不是吞吐：6.4 tok/s，但功耗只有零头。
-  它没有独立显存，因此走 SSD + 内存两层分片。
-- **CPU 上 prefill 与 decode 差距悬殊。** CPU 对提示词处理做了良好向量化
-  （198–283 tok/s），但每生成一个 token 都受内存带宽限制，所以 decode 只有 4.5 tok/s。
+- **Intel NPU（Core Ultra 7 155H 上的 AI Boost）面向常驻低功耗**，不是吞吐：
+  6.4 tok/s，但功耗只有零头。它没有独立显存，因此走 SSD + 内存两层分片。
 - **核显/Vulkan 路径的取舍**：I 卡跑 8B 时 Vulkan（140/9.2）**慢于** OpenVINO
   （1298/12.0）——OpenVINO 是 Intel 的原生优化路径；但 80B 没有 OpenVINO IR 版，
   此时 Vulkan + `--n-cpu-moe` 是唯一可行解。

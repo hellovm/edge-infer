@@ -33,19 +33,19 @@ touch the filesystem, scaffold projects and run commands.
 - **Two inference routes (pick the fastest backend per device)** — same config,
   auto-dispatched:
 
-  | Hardware | Backend | Measured tok/s (Qwen3-8B Q4_K_M) |
+  | Hardware | Backend | Measured decode tok/s (Qwen3-8B Q4_K_M) |
   |---|---|---|
   | NVIDIA GPU (RTX 4070 Laptop) | **llama.cpp CUDA** | **43.3** |
   | Intel GPU (Arc iGPU) | OpenVINO (GPU.0) | 12.0 |
-  | Intel NPU (AI Boost) | OpenVINO (NPU) | 6.4 |
-  | CPU | llama.cpp | 4.5 |
-  | CPU | OpenVINO | 3.5 |
-  | NVIDIA via OpenVINO (GPU.1) | *(not recommended)* | 2.3 ← ~19× slower |
+  | Intel NPU (AI Boost · Core Ultra 7 155H) | OpenVINO (NPU) | 6.4 |
 
   Conclusion: **OpenVINO's GPU plugin is tuned for Intel; handing it an NVIDIA
-  card wastes roughly 19× the throughput.** So NVIDIA always goes through
-  llama.cpp CUDA, while Intel GPU / NPU go through OpenVINO.
-  (Same-run prefill/decode numbers are in [Performance](#-performance).)
+  card wastes roughly 19× the throughput** (measured decode 2.3 vs 43.3 tok/s).
+  So NVIDIA always goes through llama.cpp CUDA, while Intel GPU / NPU go through
+  OpenVINO. Large MoE (80B-A3B) still runs on 8 GB VRAM via `--n-cpu-moe`
+  3-tier offloading — **9.5 tok/s decode on NVIDIA**.
+  (Full prefill/decode, CPU & Vulkan references, the `ncmoe` sweep and test
+  conditions are in [Performance](#-performance).)
 
 - **One model, format auto-matched to the device** — the catalog is organised
   as *model → variants*: a single model name carries `nvidia` / `intel-gpu` /
@@ -129,16 +129,18 @@ the same model, in the format each device prefers.
 
 | Backend · Device | Prefill tok/s | **Decode tok/s** | Relative |
 |---|---|---|---|
-| llama.cpp CUDA · RTX 4070 8 GB | 2381.8 | **43.3** | 1.00× |
+| llama.cpp CUDA · NVIDIA RTX 4070 Laptop 8 GB | 2381.8 | **43.3** | 1.00× |
 | OpenVINO · Intel Arc iGPU | 1297.7 | 12.0 | 3.6× slower |
-| OpenVINO · Intel NPU | 35.0 | 6.4 | 6.8× slower |
-| llama.cpp · CPU (16 threads) | 198.7 | 4.5 | 9.6× slower |
-| OpenVINO · CPU | 283.3 | 3.5 | 12.4× slower |
-| OpenVINO · NVIDIA (GPU.1) | 26.2 | **2.3** | **18.8× slower** |
+| OpenVINO · Intel NPU (AI Boost · Core Ultra 7 155H) | 35.0 | 6.4 | 6.8× slower |
 
 Measured with `llama-bench` (`-p 512 -n 128`, 3 reps) and `scripts/bench_ov.py`
 (531-token prompt, 128 generated tokens, 2 reps). Prefill = prompt processing,
 decode = steady-state generation.
+
+> Two further references (also Qwen3-8B, kept out of the main table): **CPU**
+> via llama.cpp is 198.7 / 4.5 and via OpenVINO 283.3 / 3.5 tok/s;
+> **NVIDIA through OpenVINO (GPU.1)** is only 26.2 / 2.3 tok/s, ~19× slower than
+> CUDA — hence not recommended.
 
 ### Large MoE 3-tier offloading (the headline)
 
@@ -179,12 +181,9 @@ stay in VRAM:
 - **Intel Arc iGPU is the strongest non-NVIDIA option** — prefill is within 1.8×
   of the 4070, and it shares system RAM, so it can host models larger than its
   dedicated budget (80B runs too, via Vulkan + 3-tier offloading).
-- **NPU is for always-on, low-power inference**, not throughput: 6.4 tok/s at a
-  fraction of the power. It has no dedicated VRAM, so it uses a SSD + RAM
-  two-tier split.
-- **Prefill vs decode diverge sharply on CPU.** CPUs vectorize prompt
-  processing well (198–283 tok/s) but are memory-bandwidth-bound per generated
-  token, hence the 4.5 tok/s decode.
+- **Intel NPU (AI Boost on Core Ultra 7 155H) is for always-on, low-power
+  inference**, not throughput: 6.4 tok/s at a fraction of the power. It has no
+  dedicated VRAM, so it uses a SSD + RAM two-tier split.
 - **iGPU/Vulkan trade-off**: for 8B on the Arc iGPU, Vulkan (140/9.2) is
   **slower** than OpenVINO (1298/12.0) — OpenVINO is Intel's native optimized
   path. But no OpenVINO IR exists for 80B, so Vulkan + `--n-cpu-moe` is the only

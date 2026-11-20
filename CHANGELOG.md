@@ -7,6 +7,20 @@
 
 ## [Unreleased]
 
+### Changed
+- README 特性表精简：移除 CPU 两行与「NVIDIA via OpenVINO (GPU.1)」行
+  （转为表下脚注），NPU 行标注具体平台 **AI Boost · Core Ultra 7 155H**；
+  中英双版同步。
+- 设备别名归一化（`_norm_dev`）：`NVIDIA GPU` / `nvidia_gpu` / `NVIDIA-GPU`
+  等等价写法统一路由，避免文档里的自然写法落空。
+
+### Fixed
+- **NPU 可用性校验**：此前显式请求 `NPU` 时不检查硬件是否存在。
+  现在新增 `_NPU_AVAILABLE`（由 OpenVINO `available_devices` 探测），
+  无 NPU 的机器（含 **AMD XDNA / Ryzen AI**，OpenVINO 不枚举该设备）
+  自动回退 CPU；模型列表的设备徽章与 `/edge/devices` 也据此修正，
+  不再谎报"支持 NPU"。
+
 ### Added
 - **`scripts/bench_llama.py` / `scripts/bench_ov.py`**：性能基准脚本，
   分别封装 `llama-bench`（含 `--n-cpu-moe` 三层卸载）与 OpenVINO GenAI
