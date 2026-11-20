@@ -756,11 +756,15 @@ async function loadCatalog(){
       const [label,color,hex]=DEV_LABEL[dev]||[dev,"var(--brand)","#2f6bff"];
       const cards=(items||[]).map(m=>{
         const scaleTag = m.scale==="large"?"大模型":"小模型";
-        return `<div class="mcard" onclick="downloadCatalog('${esc(m.repo)}',this)" title="点击下载 ${esc(m.repo)}">
+        const filesAttr = m.files ? esc(m.files.join(",")) : "";
+        const mmTag = m.mm?'<span class="tg">多模态</span>':'';
+        const actTag = m.active?`<span class="tg">激活 ${m.active}</span>`:'';
+        return `<div class="mcard" onclick="downloadCatalog('${esc(m.repo)}','${filesAttr}',this)" title="点击下载 ${esc(m.repo)}">
           ${m.installed?'<span class="installed">✓ 已安装</span>':''}
           <div class="mt">${esc(m.name)}</div>
           <div class="ms">${esc(m.repo)}</div>
-          <div class="mtags"><span class="tg">${m.params}</span><span class="tg">${m.quant}</span><span class="tg">${scaleTag}</span><span class="tg">${m.size_gb} GB</span>${m.mm?'<span class="tg">多模态</span>':''}</div>
+          <div class="mtags"><span class="tg">${m.params}</span>${actTag}<span class="tg">${m.quant}</span><span class="tg">${scaleTag}</span><span class="tg">${m.size_gb} GB</span>${mmTag}</div>
+          <div class="mh">🧩 ${esc(m.layers||"")}</div>
           <div class="mh">💾 ${esc(m.ram_hint)}</div>
           <div class="ms" style="margin-top:5px">${esc(m.note)}</div>
         </div>`;
@@ -769,11 +773,12 @@ async function loadCatalog(){
     }).join("");
   }catch(e){ box.innerHTML='<div style="color:var(--dim)">加载失败：'+esc(e.message)+'</div>'; }
 }
-async function downloadCatalog(repo, el){
+async function downloadCatalog(repo, files, el){
   if(el && el.querySelector(".installed")){ toast("该模型已安装"); return; }
   if(el) el.classList.add("loading");
   try{
-    const j=await (await fetch(API+"/edge/download?repo="+encodeURIComponent(repo),{method:"POST"})).json();
+    const f = files ? "&files="+encodeURIComponent(files) : "";
+    await (await fetch(API+"/edge/download?repo="+encodeURIComponent(repo)+f,{method:"POST"})).json();
     toast("已开始下载 "+repo.split("/").pop()+"（体积较大，请耐心等待）");
     const st=$("dlStatus"); if(st) st.textContent="下载中："+repo;
   }catch(e){ toast("下载请求失败："+e.message); if(el) el.classList.remove("loading"); }

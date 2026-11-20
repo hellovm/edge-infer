@@ -58,16 +58,40 @@ Unsupported DynamicDequantizeOp configuration:
 
 实测可跑 NPU 的模型：
 
-| 模型 | 大小 | 设备 | 速度 |
+| 模型 | 大小 | 设备 | 说明 |
 |---|---|---|---|
+| `OpenVINO/Qwen3-8B-int4-cw-ov` | 4.8 GB | NPU | 对称量化 · 加载快 |
 | `OpenVINO/DeepSeek-R1-Distill-Qwen-1.5B-int4-cw-ov` | 1.1 GB | NPU | ~19 tok/s |
-| `OpenVINO/Qwen3-8B-int4-cw-ov` | 4.5 GB | NPU | ~7 tok/s（关闭 thinking） |
-| `OpenVINO/Qwen3-0.6B-int4-ov` | 0.45 GB | NPU | 快 |
+| `OpenVINO/MiniCPM-V-4_5-int4-cw-ov` | 5.3 GB | NPU | 多模态 · 9B 级 |
 
 > Qwen3 系默认进 thinking 模式（慢）；平台默认加 `/no_think` 抑制，
 > 需深度推理时设 `EDGE_ENABLE_THINKING=1`。
 >
 > `Qwen3-VL-4B-*-int4-ov`（AWQ 非对称）**无法在 NPU 上运行**，仅 CPU/GPU。
+
+---
+
+## 📦 推荐模型（按硬件 · 偏重超大 MoE）
+
+本项目的价值在于**让原本跑不动的大模型跑起来**，所以推荐的都是 **MoE 混合专家**模型 ——
+它们的单 token 工作集只是*激活参数*（如 35B-A3B 只激活 3B），这正是三层卸载能获益的关键。
+
+工作台「菜单 → 模型」页展示同一份清单，**点击卡片即自动下载**。
+
+| 硬件 | 小模型 | 大模型 | 分层 |
+|---|---|---|---|
+| **NVIDIA GPU** | Qwen3.6-35B-A3B（19.4 GB） | Qwen3-Next-80B-A3B（48.5 GB） | SSD + 内存 + 显存 |
+| **Intel GPU** | Qwen3-30B-A3B（16.3 GB） | Qwen3.6-35B-A3B（19.4 GB） | SSD + 内存 + 共享显存 |
+| **Intel NPU** | Qwen3-8B（4.8 GB） | Qwen3-30B-A3B-nf4（15.7 GB） | SSD + 内存（无独立显存层） |
+
+- **N 卡**：从 35B-A3B 起（多模态），大到 80B-A3B —— 8 GB 显存也能跑，靠三层卸载。
+  80B 走 **llama.cpp**（GGUF Q4_K_M），因为 OpenVINO IR 目前最大只到 35B-A3B。
+- **i 卡**：共享系统内存，30B / 35B MoE 均可卸载。
+- **NPU**：本身就用系统内存（无独立显存层），因此走 **SSD + 内存两层分片**；
+  已实测 9B 多模态（MiniCPM-V-4.5），30B 级 MoE 验证进行中。
+
+> 说明：`llama.cpp` 后端的 GGUF 模型用 `--n-cpu-moe N` 把 MoE 层放到 CPU/内存、
+> 其余留在显存，是天然的三层卸载路径；OpenVINO IR 模型则由本项目 Rust 内核规划分层。
 
 ---
 

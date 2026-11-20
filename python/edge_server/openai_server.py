@@ -317,11 +317,21 @@ def edge_models():
             d = os.path.join(_MODELS_DIR, name)
             if not os.path.isdir(d):
                 continue
-            # Detect an OpenVINO IR layout.
-            #   plain LLM -> openvino_model.xml    (NPU-able with sym int4)
-            #   VLM       -> openvino_language_model.xml (CPU/GPU only)
+            # Detect the layout / backend.
+            #   OpenVINO LLM -> openvino_model.xml            (NPU-able with sym int4)
+            #   OpenVINO VLM -> openvino_language_model.xml   (CPU/GPU)
+            #   GGUF         -> *.gguf                        (llama.cpp, 3-tier offload)
             is_llm = os.path.exists(os.path.join(d, "openvino_model.xml"))
             is_vlm = os.path.exists(os.path.join(d, "openvino_language_model.xml"))
+            has_gguf = any(f.endswith(".gguf") for f in os.listdir(d))
+            if has_gguf:
+                kind = "GGUF (llama.cpp)"
+            elif is_llm:
+                kind = "OpenVINO IR (LLM)"
+            elif is_vlm:
+                kind = "OpenVINO IR (VLM)"
+            else:
+                kind = "其他"
             size = 0
             for root, _dirs, files in os.walk(d):
                 for f in files:
@@ -331,32 +341,59 @@ def edge_models():
                         pass
             out.append({
                 "id": name,
-                "note": "OpenVINO IR (LLM)" if is_llm else (
-                    "OpenVINO IR (VLM)" if is_vlm else "其他"),
+                "note": kind,
                 "size": f"{size / 1e9:.2f} GB",
                 "path": d,
-                "npu_compatible": is_llm,  # plain LLM IR + symmetric int4 -> NPU
+                "npu_compatible": is_llm,
+                "backend": "llama.cpp" if has_gguf else "openvino",
             })
     return {"models": out}
 
 
+# Track in-flight downloads so the UI can show progress.
+_DOWNLOADS: dict[str, dict] = {}
+
+
+@app.get("/edge/downloads")
+def edge_downloads():
+    """Status of in-flight / finished downloads."""
+    return {"downloads": _DOWNLOADS}
+
+
 @app.post("/edge/download")
-def edge_download(repo: str):
-    """Kick off a ModelScope download in the background. Returns immediately."""
+def edge_download(repo: str, files: str = ""):
+    """Kick off a ModelScope download in the background. Returns immediately.
+
+    ``files`` is a comma-separated allow-list (optional). It exists because some
+    GGUF repos bundle *many* quantizations (e.g. the 80B repo is >3 TB total) —
+    we only want the one quant the catalog recommends.
+    """
     import threading
+
+    short = repo.split("/")[-1].lower()
+    local = os.path.join(_MODELS_DIR, short)
+    allow = [f.strip() for f in files.split(",") if f.strip()] or None
+
+    if _DOWNLOADS.get(repo, {}).get("state") == "running":
+        return {"ok": True, "message": f"{repo} 正在下载中。"}
+
+    _DOWNLOADS[repo] = {"state": "running", "local": local, "files": allow or "all"}
 
     def _run():
         try:
             from modelscope import snapshot_download
 
-            short = repo.split("/")[-1].lower()
-            local = os.path.join(_MODELS_DIR, short)
-            snapshot_download(repo, local_dir=local)
+            kw = {"local_dir": local}
+            if allow:
+                kw["allow_patterns"] = allow
+            snapshot_download(repo, **kw)
+            _DOWNLOADS[repo]["state"] = "done"
         except Exception as e:  # noqa: BLE001
+            _DOWNLOADS[repo]["state"] = "error"
+            _DOWNLOADS[repo]["error"] = str(e)[:300]
             print(f"[edge-infer] download failed for {repo}: {e}")
 
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
+    threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "message": f"已开始后台下载 {repo}，完成后刷新模型列表。"}
 
 

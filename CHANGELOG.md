@@ -18,8 +18,11 @@ v0.2.0 之后的增量（版本号待正式发布时再定）。
 - 新增 Tauri 命令 `start_service` / `service_status`（供前端手动重试）。
 - GUI 启动状态提示：「正在启动推理服务…」→ 就绪 / 失败可点击重试。
 - **模型推荐目录**（`model_catalog.py`）：NVIDIA / Intel GPU / Intel NPU 各
-  2 个多模态模型（一大一小），标注参数量、量化方式、体积与内存建议；
-  新增 `/edge/catalog` 端点（含已安装标记），点击卡片直接下载。
+  2 个模型（一大一小），**以超大 MoE 为主**（利用三层卸载的优势），
+  标注参数量、激活参数、量化方式、体积、内存建议与分层方式；新增
+  `/edge/catalog` 端点（含已安装标记），点击卡片直接下载。
+  支持 GGUF 仓库按文件白名单下载（避免误拉多个量化版本，80B 仓库全量 >3 TB）。
+  另新增 `/edge/downloads` 查看下载状态。
 - **运行时设备切换**：`/edge/device/set`、`/edge/device/current`，
   NVIDIA GPU / Intel NPU / CPU / AUTO 真正生效。
 - **思考模式开关**：关闭时过滤 `think` 块，开启时以折叠框展示思考过程。
