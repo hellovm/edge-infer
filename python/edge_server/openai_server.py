@@ -429,10 +429,14 @@ def edge_run_plan(context: int = 8192, large_threshold_gb: int = 8):
 
 
 @app.get("/edge/catalog")
-def edge_catalog():
-    """Curated multimodal model recommendations per accelerator."""
+def edge_catalog(device: Optional[str] = None):
+    """Recommended models, one entry per model with a variant per device.
+
+    The GUI passes the currently-selected device so each card can highlight the
+    matching variant (GGUF for NVIDIA, INT4 IR for Intel GPU / NPU).
+    """
     try:
-        from .model_catalog import CATALOG
+        from .model_catalog import MODELS, DEVICE_LABELS, resolve_device
 
         installed = set()
         if os.path.isdir(_MODELS_DIR):
@@ -442,20 +446,40 @@ def edge_catalog():
             return s.lower().replace("-", "").replace("_", "").replace(".", "")
 
         def installed_for(repo: str) -> bool:
-            # repo short name (e.g. MiniCPM-V-4_5-int4-cw-ov) vs local dir
-            # (e.g. minicpm-v-4_5-int4-cw). Match on a normalized core token.
             short = _norm(repo.split("/")[-1])
-            core = short.replace("ov", "") if short.endswith("ov") else short
+            core = short[:-2] if short.endswith("ov") else short
             for n in installed:
                 nn = _norm(n)
                 if nn == short or nn.startswith(core[:14]) or core.startswith(nn[:14]):
                     return True
             return False
 
-        out = {}
-        for dev, items in CATALOG.items():
-            out[dev] = [{**it, "installed": installed_for(it["repo"])} for it in items]
-        return {"catalog": out}
+        sel = resolve_device(device)
+
+        out = []
+        for m in MODELS:
+            variants = []
+            for dev, v in m["variants"].items():
+                variants.append({
+                    **v,
+                    "device": dev,
+                    "device_label": DEVICE_LABELS.get(dev, dev),
+                    "installed": installed_for(v["repo"]),
+                })
+            # Recommended variant: the one matching the selected device, else the
+            # first (NVIDIA → Intel GPU → NPU order as authored).
+            rec = next((v for v in variants if v["device"] == sel), None) or variants[0]
+            out.append({
+                "name": m["name"],
+                "params": m["params"],
+                "active": m["active"],
+                "mm": m["mm"],
+                "note": m["note"],
+                "variants": variants,
+                "recommended": rec,
+                "selected_device": sel,
+            })
+        return {"models": out}
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"catalog error: {e}")
 

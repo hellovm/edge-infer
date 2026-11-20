@@ -194,6 +194,20 @@
   .mcard .mtags{margin-top:7px;display:flex;gap:5px;flex-wrap:wrap}
   .mcard .tg{font-size:10.5px;padding:1px 6px;border-radius:5px;background:var(--panel2);color:var(--dim)}
   .mcard .installed{position:absolute;top:9px;right:9px;font-size:10.5px;color:var(--ok);font-weight:600}
+  /* model card v2 (per-model, variant-aware) */
+  .mcard2{position:relative;border:1px solid var(--line);border-radius:12px;padding:13px;background:#fff;transition:.15s;display:flex;flex-direction:column}
+  .mcard2:hover{border-color:var(--brand);box-shadow:var(--shadow)}
+  .mcard2 .mt{font-weight:650;font-size:14px}
+  .mcard2 .ms{font-size:11.5px;color:var(--dim);margin-top:2px;word-break:break-all}
+  .mcard2 .mh{margin-top:8px;font-size:11.5px;color:var(--npu);background:rgba(47,143,255,.07);padding:6px 8px;border-radius:6px;line-height:1.45}
+  .mcard2 .mtags{margin-top:8px;display:flex;gap:5px;flex-wrap:wrap}
+  .mcard2 .tg{font-size:10.5px;padding:2px 7px;border-radius:5px;background:var(--panel2);color:var(--dim)}
+  .mcard2 .tgdev{background:rgba(47,143,255,.12);color:var(--brand);font-weight:600}
+  .mcard2 .installed{position:absolute;top:11px;right:11px;font-size:10.5px;color:var(--ok);font-weight:600}
+  .mcard2 .alt{margin-top:7px;font-size:11px;color:var(--dim)}
+  .mcard2 .alt a{color:var(--brand);cursor:pointer;text-decoration:underline dotted}
+  .mcard2 .btn.loading{opacity:.6;pointer-events:none}
+  #catHint{grid-column:1/-1}
   .mcard.loading{opacity:.6;pointer-events:none}
   ::-webkit-scrollbar{width:9px;height:9px}
   ::-webkit-scrollbar-thumb{background:#d5d9e0;border-radius:5px;border:2px solid transparent;background-clip:content-box}
@@ -748,7 +762,7 @@ const PANELS={
     <div class="panel">
       <div class="sec">
         <h3>推荐模型</h3>
-        <div class="desc">按加速硬件分组，点击卡片即可下载。每项标注模型介绍与推荐硬件规格。</div>
+        <div class="desc">按模型展示，自动匹配当前设备的格式（NVIDIA → GGUF/llama.cpp、Intel → OpenVINO IR）。点击下载即可，无需手动挑文件。</div>
         <div id="catalog" class="catalog"></div>
       </div>
       <div class="sec"><h3>已安装模型</h3><div id="modelList"></div></div>
@@ -874,40 +888,57 @@ async function loadModels(){ try{ const j=await (await fetch(API+"/edge/models")
 }catch(e){ $("modelList").innerHTML='<div style="color:var(--dim)">读取失败：'+esc(e.message)+'</div>'; } }
 
 const DEV_LABEL={nvidia:["NVIDIA GPU","var(--nvidia)","#76b900"],"intel-gpu":["Intel GPU","var(--cpu)","#8b5cf6"],npu:["Intel NPU","var(--npu)","#2f8fff"]};
+const DEV_KEY_OF={"NVIDIA-GPU":"nvidia","nvidia":"nvidia","Intel-GPU":"intel-gpu","intel-gpu":"intel-gpu","NPU":"npu","npu":"npu"};
+let CATALOG=[];
+function curDevKey(){ return DEV_KEY_OF[state.device]||null; }
 async function loadCatalog(){
   const box=$("catalog"); if(!box) return;
   box.innerHTML='<div style="color:var(--dim);font-size:12.5px">加载推荐模型…</div>';
   try{
-    const j=await (await fetch(API+"/edge/catalog")).json();
-    const cat=j.catalog||{};
-    box.innerHTML=Object.entries(cat).map(([dev,items])=>{
-      const [label,color,hex]=DEV_LABEL[dev]||[dev,"var(--brand)","#2f6bff"];
-      const cards=(items||[]).map(m=>{
-        const filesAttr = m.files ? esc(m.files.join(",")) : "";
-        const mmTag = m.mm?'<span class="tg">多模态</span>':'';
-        const actTag = m.active && m.active!==m.params ? `<span class="tg">激活 ${m.active}</span>`:'';
-        return `<div class="mcard" onclick="downloadCatalog('${esc(m.repo)}','${filesAttr}',this)" title="点击下载 ${esc(m.repo)}">
-          ${m.installed?'<span class="installed">✓ 已安装</span>':''}
-          <div class="mt">${esc(m.name)}</div>
-          <div class="ms">${esc(m.repo)}</div>
-          <div class="mtags"><span class="tg">${m.params}</span>${actTag}<span class="tg">${m.quant}</span><span class="tg">${m.size_gb} GB</span>${mmTag}</div>
-          <div class="mh">🧩 推荐规格：${esc(m.ram_hint||"")}</div>
-          <div class="ms" style="margin-top:6px">${esc(m.note)}</div>
-        </div>`;
-      }).join("");
-      return `<div class="catcol"><div class="ch"><span class="dot" style="background:${color}"></span>${label}</div><div class="cb">${cards}</div></div>`;
-    }).join("");
+    const sel=curDevKey();
+    const j=await (await fetch(API+"/edge/catalog"+(sel?"?device="+encodeURIComponent(state.device):""))).json();
+    CATALOG=j.models||[];
+    renderCatalog();
   }catch(e){ box.innerHTML='<div style="color:var(--dim)">加载失败：'+esc(e.message)+'</div>'; }
 }
-async function downloadCatalog(repo, files, el){
-  if(el && el.querySelector(".installed")){ toast("该模型已安装"); return; }
+function renderCatalog(){
+  const box=$("catalog"); if(!box) return;
+  if(!CATALOG.length){ box.innerHTML='<div style="color:var(--dim)">暂无推荐</div>'; return; }
+  const sel=curDevKey();
+  box.innerHTML=CATALOG.map((m,mi)=>{
+    const v=m.recommended||m.variants[0];
+    const filesAttr=v.files?esc(v.files.join(",")):"";
+    const mmTag=m.mm?'<span class="tg">多模态</span>':'';
+    const actTag=(m.active&&m.active!==m.params)?`<span class="tg">激活 ${m.active}</span>`:'';
+    const devTag=`<span class="tg tgdev">${esc(v.device_label)}</span>`;
+    const others=m.variants.length>1?`<div class="alt">也支持：${m.variants.filter(x=>x!==v).map(x=>`<a onclick="event.stopPropagation();dlVariant('${esc(x.repo)}','${x.files?esc(x.files.join(",")):""}')">${esc(x.device_label)} (${x.quant})</a>`).join("、")}</div>`:"";
+    return `<div class="mcard2">
+      ${v.installed?'<span class="installed">✓ 已安装</span>':''}
+      <div class="mt">${esc(m.name)}</div>
+      <div class="mtags"><span class="tg">${m.params}</span>${actTag}<span class="tg">${v.quant}</span><span class="tg">${v.size_gb} GB</span>${devTag}${mmTag}</div>
+      <div class="mh">🧩 推荐规格：${esc(v.ram_hint||"")}</div>
+      <div class="ms" style="margin-top:6px">${esc(m.note)}</div>
+      <div class="ms mono" style="margin-top:4px;font-size:11px">${esc(v.repo)}</div>
+      ${others}
+      <button class="btn primary" style="margin-top:9px;width:100%" onclick="dlVariant('${esc(v.repo)}','${filesAttr}',this)">下载（${esc(v.device_label)} · ${esc(v.quant)}）</button>
+    </div>`;
+  }).join("");
+  if(!sel){
+    box.insertAdjacentHTML("afterend",'<div class="desc" id="catHint" style="margin-top:8px">提示：在「设置 → 加速设备」选择设备后，这里会自动匹配对应格式（NVIDIA→GGUF / Intel→OpenVINO）。</div>');
+  }else{
+    const h=$("catHint"); if(h) h.remove();
+  }
+}
+async function dlVariant(repo, files, el){
+  if(el && el.classList.contains("loading")) return;
   if(el) el.classList.add("loading");
   try{
     const f = files ? "&files="+encodeURIComponent(files) : "";
     await (await fetch(API+"/edge/download?repo="+encodeURIComponent(repo)+f,{method:"POST"})).json();
     toast("已开始下载 "+repo.split("/").pop()+"（体积较大，请耐心等待）");
     const st=$("dlStatus"); if(st) st.textContent="下载中："+repo;
-  }catch(e){ toast("下载请求失败："+e.message); if(el) el.classList.remove("loading"); }
+  }catch(e){ toast("下载请求失败："+e.message); }
+  if(el) el.classList.remove("loading");
 }
 async function downloadModel(){ const repo=$("modelRepo").value.trim(); if(!repo){toast("请输入仓库 ID");return}
   $("dlStatus").textContent="请求下载 "+repo+" …";
@@ -940,7 +971,15 @@ async function selectDevice(id,name){
   state.device=id; LS.write("device",id); renderDevGrid();
   try{ const j=await (await fetch(API+"/edge/device/set?device="+encodeURIComponent(id),{method:"POST"})).json();
     toast("已切换设备："+name); loadDeviceChip();
+    // 模型页按设备自动匹配格式，切换后刷新
+    if($("catalog")) loadCatalog();
+    if(MODELS.length) toggleModelMenuRefresh();
   }catch(e){ toast("切换失败："+e.message); }
+}
+function toggleModelMenuRefresh(){
+  const m=$("modelMenu");
+  if(m && m.classList.contains("show")) toggleModelMenuPane();
+  refreshModelPick();
 }
 function toggleExternal(){ state.useExternal=!state.useExternal; LS.write("useExternal",state.useExternal);
   $("swExternal").classList.toggle("on",state.useExternal); $("extFields").style.display=state.useExternal?"block":"none"; }
