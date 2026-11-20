@@ -716,11 +716,14 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     import json as _j
     import urllib.request
 
-    if not _llama.running() or (_llama._cfg and _llama._cfg.model_path != gguf_path):
+    want_think = bool(getattr(req, "enable_thinking", False))
+    if not _llama.running() or (_llama._cfg and (
+            _llama._cfg.model_path != gguf_path or _llama._cfg.reasoning != want_think)):
         # NVIDIA → offload everything to CUDA (discrete VRAM). MoE layers can be
         # pushed to CPU/RAM via EDGE_N_CPU_MOE when the model exceeds VRAM.
         n_cpu_moe = int(os.environ.get("EDGE_N_CPU_MOE", "0") or 0)
-        _llama.load(LlamaConfig(model_path=gguf_path, port=8081, n_cpu_moe=n_cpu_moe))
+        _llama.load(LlamaConfig(model_path=gguf_path, port=8081,
+                                n_cpu_moe=n_cpu_moe, reasoning=want_think))
 
     msgs = []
     if system:
@@ -757,7 +760,16 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
             try:
                 obj = _j.loads(data)
                 d = obj["choices"][0].get("delta", {})
-                delta = d.get("content") or d.get("reasoning_content") or ""
+                # llama-server puts Qwen3 thinking in `reasoning_content`.
+                # Thinking OFF → drop it (else it leaks into the answer as
+                # visible text). Thinking ON → wrap in  thinking…</think> so the
+                # GUI can collapse it.
+                content = d.get("content") or ""
+                reasoning = d.get("reasoning_content") or ""
+                if reasoning and getattr(req, "enable_thinking", False):
+                    delta = " thinking" + reasoning + "</think>"
+                else:
+                    delta = content
             except Exception:
                 continue
             if delta:

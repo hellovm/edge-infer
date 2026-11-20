@@ -61,6 +61,7 @@ class LlamaConfig:
     n_cpu_moe: int = 0           # MoE layers kept on CPU (3-tier offload knob)
     ctx: int = 8192
     threads: int = 0             # 0 -> auto
+    reasoning: bool = False      # Qwen3 thinking; off by default for chat
 
 
 class LlamaBackend:
@@ -104,6 +105,11 @@ class LlamaBackend:
             args += ["--n-cpu-moe", str(cfg.n_cpu_moe)]
         if cfg.threads:
             args += ["-t", str(cfg.threads)]
+
+        # Qwen3-style thinking: off by default (much faster, cleaner answers);
+        # `--reasoning-format deepseek` keeps any thoughts out of `content`.
+        args += ["--reasoning", "on" if cfg.reasoning else "off",
+                 "--reasoning-format", "deepseek"]
 
         kwargs = {}
         if os.name == "nt":
