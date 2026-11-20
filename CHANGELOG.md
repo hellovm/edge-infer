@@ -27,6 +27,22 @@ v0.2.0 之后的增量（版本号待正式发布时再定）。
   无法承载的更大 MoE（80B-A3B 及以上）。以子进程方式管理 `llama-server`，
   通过 `--n-cpu-moe` 把 MoE 层放到 CPU/内存实现三层卸载；`/v1/chat/completions`
   自动按模型格式（GGUF vs OpenVINO IR）路由到对应后端，含 SSE 流式。
+- **双推理路线**：按硬件匹配最快的后端。实测（Qwen3-0.6B Q4）——
+  llama.cpp CUDA **126.7 tok/s**、OpenVINO Intel iGPU 27.1、CPU 28.8，
+  而 **NVIDIA 经 OpenVINO 只有 6.1 tok/s（慢约 20×）**。
+  因此 NVIDIA → llama.cpp CUDA，Intel GPU / NPU → OpenVINO；
+  选 N 卡却用 IR 模型时会明确提示改用 GGUF，不再静默走慢路径。
+- **模型选择**：输入区新增模型下拉，按当前设备过滤；后端 `_resolve_model_dir`
+  支持按请求切换模型。
+
+### Changed
+- 推荐模型目录：N 卡组改为 **GGUF（llama.cpp CUDA）**；卡片去掉「大/小」标注，
+  只保留模型名称、介绍与推荐硬件规格。
+
+### Notes
+- **量化说明**：FP4/NVFP4 需 Blackwell（RTX 50 系，sm120）的 FP4 张量核；
+  RTX 40 系（Ada，sm89）**无 FP4 通路**，NVFP4 退化为软件模拟可能更慢。
+  Ada 卡宜用 FP8（vLLM/TensorRT-LLM）或 GGUF Q4_K_M/Q5_K_M。
 - **运行时设备切换**：`/edge/device/set`、`/edge/device/current`，
   NVIDIA GPU / Intel NPU / CPU / AUTO 真正生效。
 - **思考模式开关**：关闭时过滤 `think` 块，开启时以折叠框展示思考过程。

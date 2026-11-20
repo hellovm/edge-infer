@@ -79,6 +79,99 @@ DEFAULT_DEVICE = os.environ.get("EDGE_DEVICE", "NPU")
 # VLM. Override with EDGE_MODEL_DIR.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Detect the discrete NVIDIA GPU once, so device aliases can route to the right
+# backend. OpenVINO itself tells us which GPU.* id is discrete + NVIDIA-named.
+_NVIDIA_DEVICE_IDS: set = set()
+_INTEL_GPU_DEVICE_IDS: set = set()
+_NVIDIA_AVAILABLE = False
+
+
+def _probe_gpu_ids() -> None:
+    """Classify OpenVINO's GPU.* ids into NVIDIA (discrete) vs Intel (integrated)."""
+    global _NVIDIA_AVAILABLE
+    try:
+        import openvino as ov
+
+        core = ov.Core()
+        for d in core.get_available_devices():
+            if not d.startswith("GPU"):
+                continue
+            name = ""
+            try:
+                name = str(core.get_property(d, "FULL_DEVICE_NAME"))
+            except Exception:  # noqa: BLE001
+                pass
+            if "NVIDIA" in name.upper():
+                _NVIDIA_DEVICE_IDS.add(d.upper())
+                _NVIDIA_AVAILABLE = True
+            elif "INTEL" in name.upper() or "ARC" in name.upper():
+                _INTEL_GPU_DEVICE_IDS.add(d.upper())
+        # CUDA is available if nvidia-smi answers, even without OpenVINO.
+        if not _NVIDIA_AVAILABLE:
+            import shutil as _sh
+            _NVIDIA_AVAILABLE = bool(_sh.which("nvidia-smi"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_probe_gpu_ids()
+
+
+def _is_nvidia(dev: Optional[str]) -> bool:
+    """True when the requested device explicitly targets the NVIDIA GPU.
+
+    Note: ``AUTO`` is intentionally NOT treated as NVIDIA here — auto means
+    "pick the best device for the chosen model", which is handled per backend.
+    """
+    if not dev:
+        return False
+    d = str(dev).upper().replace(" ", "")
+    if d in ("NVIDIA-GPU", "NVIDIA", "CUDA"):
+        return True
+    return d in _NVIDIA_DEVICE_IDS
+
+
+def _is_intel_gpu(dev: Optional[str]) -> bool:
+    if not dev:
+        return False
+    d = str(dev).upper().replace(" ", "")
+    if d in ("INTEL-GPU", "IGPU", "INTELGPU"):
+        return True
+    if d == "AUTO":
+        return False
+    return d in _INTEL_GPU_DEVICE_IDS
+
+
+def _ov_device(dev: Optional[str], model_kind: str) -> str:
+    """Map a GUI device alias to an OpenVINO device string.
+
+    NVIDIA has no fast OpenVINO path (measured ~20× slower than CUDA), so an
+    IR model requested on NVIDIA falls back to CPU rather than pretending.
+    """
+    d = (dev or "").upper().replace(" ", "")
+    if d == "NPU":
+        return "NPU"
+    if d in ("INTEL-GPU", "IGPU", "INTELGPU") or d in _INTEL_GPU_DEVICE_IDS:
+        return "GPU.0"
+    if d in ("NVIDIA-GPU", "NVIDIA", "CUDA") or d in _NVIDIA_DEVICE_IDS:
+        return "CPU"        # OpenVINO on NVIDIA is not the fast path
+    if d in ("CPU",):
+        return "CPU"
+    # AUTO / empty: best OpenVINO device for the model kind.
+    if model_kind == "llm" and "NPU" in _ov_devices():
+        return "NPU"
+    if any(x.startswith("GPU") for x in _ov_devices()):
+        return "GPU.0"
+    return "CPU"
+
+
+def _ov_devices() -> list:
+    try:
+        import openvino as ov
+        return ov.Core().get_available_devices()
+    except Exception:  # noqa: BLE001
+        return []
+
 
 def _pick_default_model_dir() -> str:
     env = os.environ.get("EDGE_MODEL_DIR")
@@ -506,7 +599,10 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     import urllib.request
 
     if not _llama.running() or (_llama._cfg and _llama._cfg.model_path != gguf_path):
-        _llama.load(LlamaConfig(model_path=gguf_path, port=8081))
+        # NVIDIA → offload everything to CUDA (discrete VRAM). MoE layers can be
+        # pushed to CPU/RAM via EDGE_N_CPU_MOE when the model exceeds VRAM.
+        n_cpu_moe = int(os.environ.get("EDGE_N_CPU_MOE", "0") or 0)
+        _llama.load(LlamaConfig(model_path=gguf_path, port=8081, n_cpu_moe=n_cpu_moe))
 
     msgs = []
     if system:
@@ -583,6 +679,8 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
     model_ok = os.path.isdir(model_dir)
     dev = req.device or DEFAULT_DEVICE
     model_kind = _model_kind(model_dir) if model_ok else "none"
+    # OpenVINO device string (NVIDIA maps to CPU — CUDA is handled by llama.cpp).
+    ov_dev = _ov_device(dev, model_kind)
 
     def _degrade_text() -> str:
         prompt = "\n".join(f"{m.role}: {m.content}" for m in req.messages)
@@ -620,12 +718,18 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
             use_llama = _LLAMA_AVAILABLE and gguf is not None
             use_genai = (not use_llama) and _GENAI_AVAILABLE and model_ok and model_kind == "llm"
             use_vlm_img = (not use_llama and not use_genai) and bool(req.images) and model_kind == "vlm" and _VLM_AVAILABLE
+            # NVIDIA + non-GGUF model: OpenVINO would run ~20× slower there, so
+            # warn loudly instead of silently degrading.
+            if _is_nvidia(dev) and model_kind in ("llm", "vlm") and not use_llama:
+                yield sse({"notice": "所选模型为 OpenVINO IR；NVIDIA 走 CUDA 需 GGUF 模型。"
+                                     "当前将用 OpenVINO 的 CPU 路径（较慢）。"
+                                     "建议在模型页选择 GGUF 模型（如 Qwen3.6-35B-A3B）。"})
             try:
                 if use_vlm_img:
                     # VLM with images → VLMPipeline; emit the whole answer at once.
                     global _vlm_img
                     if _vlm_img is None or _vlm_img.model_dir != model_dir:
-                        _vlm_img = VlmImagePipeline(model_dir, device="GPU.0" if dev in ("auto", "AUTO", "GPU") else dev)
+                        _vlm_img = VlmImagePipeline(model_dir, device=ov_dev)
                     r = _vlm_img.chat(user, req.images, system=system,
                                       max_new_tokens=req.max_tokens, temperature=req.temperature)
                     yield frame(r.text)
@@ -638,7 +742,7 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
                     yield from _llama_stream(frame, gguf, req, system, user)
                 elif use_genai:
                     _genai.load(
-                        model_dir, device=dev,
+                        model_dir, device=ov_dev,
                         cache_dir=os.path.join(model_dir, ".npu_cache", dev),
                     )
                     t0 = time.time()
@@ -686,7 +790,7 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
         try:
             global _vlm_img
             if _vlm_img is None or _vlm_img.model_dir != model_dir:
-                _vlm_img = VlmImagePipeline(model_dir, device="GPU.0" if dev in ("auto", "AUTO", "GPU") else dev)
+                _vlm_img = VlmImagePipeline(model_dir, device=ov_dev)
             r = _vlm_img.chat(user, req.images, system=system,
                               max_new_tokens=req.max_tokens, temperature=req.temperature)
             return _resp(req.model, r.text, prompt_tokens=r.prompt_tokens,
@@ -714,7 +818,7 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
         try:
             _genai.load(
                 model_dir,
-                device=dev,
+                device=ov_dev,
                 cache_dir=os.path.join(model_dir, ".npu_cache", dev),
             )
             r = _genai.chat(

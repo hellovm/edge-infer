@@ -23,13 +23,27 @@ Agent 工作台**（可真正操作文件系统、创建项目文件夹、执行
   显存动态探测（NVML），OOM 自动回退（缩短上下文 / 降级专家）。
 - **Prerouter 预取** — 一步前瞻预测下一 token 要用的专家，在当前前向计算时
   并行把它从慢层拉到快层，用计算掩盖 IO。
-- **多硬件加速** — NVIDIA GPU（CUDA，大 MoE 三层）、Intel NPU（AI Boost，
-  小模型）、CPU 回退；NPU→CPU 自动降级。
+- **双推理路线（按硬件匹配最快的后端）** — 同一份配置下自动分流：
+
+  | 硬件 | 后端 | 实测 tok/s（Qwen3-0.6B Q4） |
+  |---|---|---|
+  | NVIDIA GPU | **llama.cpp CUDA** | **126.7** |
+  | Intel GPU (Arc) | OpenVINO | 27.1 |
+  | CPU | OpenVINO | 28.8 |
+  | NVIDIA via OpenVINO | （不推荐） | 6.1 ← 慢 ~20× |
+
+  关键结论：**OpenVINO 的 GPU 插件面向 Intel 优化，把 N 卡交给它等于浪费 20 倍性能**。
+  因此 N 卡一律走 llama.cpp CUDA，Intel GPU / NPU 走 OpenVINO。
+
 - **纯 OpenVINO 推理链路** — 不依赖 torch / transformers，只用 `openvino` +
   `tokenizers` + `numpy`，绕开版本地狱（VLM 路径）。
-- **OpenVINO GenAI 后端** — `LLMPipeline` 驱动 NPU/GPU/CPU，支持 **SSE 流式输出**。
-- **llama.cpp 后端** — 运行 GGUF 模型，覆盖 OpenVINO IR 无法承载的更大 MoE
-  （80B-A3B 及以上）；用 `--n-cpu-moe` 把 MoE 层放到 CPU/内存实现三层卸载。
+- **OpenVINO GenAI 后端** — `LLMPipeline` 驱动 NPU / Intel GPU / CPU，支持 **SSE 流式输出**。
+- **llama.cpp 后端** — 运行 GGUF 模型（NVIDIA CUDA 路径），覆盖 OpenVINO IR
+  无法承载的更大 MoE（80B-A3B 及以上）；用 `--n-cpu-moe` 把 MoE 层放到
+  CPU/内存实现三层卸载。
+- **量化说明** — FP4/NVFP4 需 Blackwell（RTX 50 系，sm120）的 FP4 张量核；
+  **RTX 40 系（Ada，sm89）没有 FP4 通路**，NVFP4 会退化为软件模拟（可能更慢）。
+  Ada 卡的正确选择是 **FP8**（需 vLLM/TensorRT-LLM）或 **GGUF Q4_K_M / Q5_K_M**。
 - **本地 Agent** — 模型可自主调用工具：创建任务文件夹、
   读写文件、搜索、执行命令；全部限制在沙箱工作区内。
 - **OpenAI 兼容 API** — 对外暴露 `/v1/chat/completions`（含 `stream=true`），
@@ -80,15 +94,18 @@ Unsupported DynamicDequantizeOp configuration:
 
 工作台「菜单 → 模型」页展示同一份清单，**点击卡片即自动下载**。
 
-| 硬件 | 小模型 | 大模型 | 分层 |
+| 硬件 | 模型 | 后端 | 分层 |
 |---|---|---|---|
-| **NVIDIA GPU** | Qwen3.6-35B-A3B（19.4 GB） | Qwen3-Next-80B-A3B（48.5 GB） | SSD + 内存 + 显存 |
-| **Intel GPU** | Qwen3-30B-A3B（16.3 GB） | Qwen3.6-35B-A3B（19.4 GB） | SSD + 内存 + 共享显存 |
-| **Intel NPU** | Qwen3-8B（4.8 GB） | Qwen3-30B-A3B-nf4（15.7 GB） | SSD + 内存（无独立显存层） |
+| **NVIDIA GPU** | Qwen3.6-35B-A3B（21.2 GB） | llama.cpp CUDA | SSD + 内存 + 显存 |
+| **NVIDIA GPU** | Qwen3-Next-80B-A3B（48.5 GB） | llama.cpp CUDA | SSD + 内存 + 显存 |
+| **Intel GPU** | Qwen3-30B-A3B（16.3 GB） | OpenVINO | SSD + 内存 + 共享显存 |
+| **Intel GPU** | Qwen3.6-35B-A3B（19.4 GB） | OpenVINO | SSD + 内存 + 共享显存 |
+| **Intel NPU** | Qwen3-8B（4.8 GB） | OpenVINO | SSD + 内存（无独立显存层） |
+| **Intel NPU** | MiniCPM-V-4.5 9B（5.3 GB） | OpenVINO | SSD + 内存（无独立显存层） |
 
-- **N 卡**：从 35B-A3B 起（多模态），大到 80B-A3B —— 8 GB 显存也能跑，靠三层卸载。
-  80B 走 **llama.cpp**（GGUF Q4_K_M），因为 OpenVINO IR 目前最大只到 35B-A3B。
-- **i 卡**：共享系统内存，30B / 35B MoE 均可卸载。
+- **N 卡**：一律走 **llama.cpp CUDA**（实测 126.7 tok/s；交给 OpenVINO 只有 6.1）。
+  从 35B-A3B 到 80B-A3B —— 8 GB 显存也能跑，靠三层卸载。
+- **i 卡**：走 **OpenVINO**（Arc 上比 Vulkan 快约 1.8×），30B / 35B MoE 均可卸载。
 - **NPU**：本身就用系统内存（无独立显存层），因此走 **SSD + 内存两层分片**；
   已实测 9B 多模态（MiniCPM-V-4.5），30B 级 MoE 验证进行中。
 
