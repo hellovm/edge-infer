@@ -486,26 +486,42 @@ async function loadModelsForPicker(){
   refreshModelPick();
 }
 function modelById(id){ return MODELS.find(m=>m.id===id); }
+function deviceBadge(m, full){
+  if(!m) return "";
+  const ds=m.devices||[];
+  if(!ds.length) return "—";
+  if(full) return ds.join(" / ");
+  // Compact: primary device + "+N" when it runs on more than one.
+  return ds.length>1 ? `${ds[0]} +${ds.length-1}` : ds[0];
+}
 function refreshModelPick(){
   const m=modelById(state.modelId)||MODELS[0];
   $("modelPickName").textContent = m? m.id : "默认模型";
-  $("modelPickBackend").textContent = m? (m.note||"").replace(/\(.*\)/,"").trim() : "";
+  $("modelPickBackend").textContent = deviceBadge(m);
   $("modelPickName").title = m? m.id : "";
+}
+const DEV_ALIAS={"NVIDIA-GPU":"NVIDIA GPU","nvidia":"NVIDIA GPU","NPU":"NPU","npu":"NPU",
+  "Intel-GPU":"Intel GPU","intel-gpu":"Intel GPU","CPU":"CPU","cpu":"CPU","auto":null};
+function frontendDevKey(){
+  const d=state.device||"auto";
+  const norm={"NVIDIA-GPU":"NVIDIA GPU","NPU":"NPU","Intel-GPU":"Intel GPU","CPU":"CPU"}[d];
+  return norm||null;
 }
 function toggleModelMenuPane(){
   const box=$("modelMenu"); box.classList.toggle("show");
   if(!box.classList.contains("show")) return;
   if(!MODELS.length){ box.innerHTML='<div class="grp">无本地模型</div>'; return; }
-  const dev=state.device||"auto";
-  const devKey=dev==="NVIDIA-GPU"?"NVIDIA-GPU":dev==="NPU"?"NPU":dev==="Intel-GPU"?"Intel-GPU":null;
-  const fits=(m)=>!devKey || (m.devices||[]).includes(devKey) || devKey==="CPU" || devKey==="Intel-GPU";
+  const devKey=frontendDevKey();
+  const fits=(m)=>!devKey || (m.devices||[]).includes(devKey);
   box.innerHTML = MODELS.map(m=>{
     const ok=fits(m);
+    const badge=deviceBadge(m);
+    const badgeFull=deviceBadge(m,true);
     return `<div class="mm${m.id===state.modelId?" sel":""}" onclick="selectModel('${esc(m.id)}')" style="${ok?"":"opacity:.45"}">
       <span>${m.kind==="gguf"?"🧩":m.kind==="vlm"?"🖼️":"🧠"}</span>
       <span class="nm">${esc(m.id)}</span>
       <span class="sz">${m.size||""}</span>
-      <span class="bk">${m.backend||""}</span>
+      <span class="bk" title="支持设备：${esc(badgeFull)}">${esc(badge)}</span>
     </div>`;
   }).join("");
 }

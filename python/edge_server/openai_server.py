@@ -173,6 +173,33 @@ def _ov_devices() -> list:
         return []
 
 
+def _npu_compatible(model_dir: str, kind: str) -> bool:
+    """Whether this model can actually compile on the Intel NPU.
+
+    NPU (Meteor Lake / NPU3720) supports **symmetric INT4** (channel-wise
+    ``int4-cw`` / group-wise ``int4-gq``) but **not** asymmetric AWQ or NF4 —
+    those fail with ``Unsupported data type 'nf4'`` / DynamicDequantizeOp.
+    Only a plain LLM IR in a symmetric-int4 export qualifies.
+    """
+    if kind != "llm":
+        return False
+    name = os.path.basename(model_dir).lower()
+    if "int4-cw" in name or "int4-gq" in name or "int8-cw" in name:
+        return True
+    # Fall back to the export config when the name isn't conclusive.
+    cfg = os.path.join(model_dir, "openvino_config.json")
+    if os.path.exists(cfg):
+        try:
+            import json as _j
+            q = (_j.load(open(cfg, encoding="utf-8")).get("quantization_config") or {})
+            method = str((q.get("default_config") or {}).get("quant_method", "")).lower()
+            if method in ("awq", "nf4", "gptq"):
+                return False
+        except Exception:  # noqa: BLE001
+            pass
+    return False
+
+
 def _pick_default_model_dir() -> str:
     env = os.environ.get("EDGE_MODEL_DIR")
     if env:
@@ -451,15 +478,22 @@ def edge_models():
                 "llm": "OpenVINO IR (LLM)",
                 "vlm": "OpenVINO IR (VLM)",
             }.get(kind, "其他")
-            # Which accelerators can actually run this model?
+            # Which *devices this machine actually has* can run this model?
+            # (Only list hardware that's present, so the GUI badge is honest.)
+            npu_ok = _npu_compatible(d, kind)
             devices = []
             if kind in ("llm", "vlm"):
-                devices = ["CPU", "GPU"]       # OpenVINO device plugins
+                if npu_ok:
+                    devices.append("NPU")
+                if any(x.startswith("GPU") for x in _INTEL_GPU_DEVICE_IDS) or any(
+                    x.startswith("GPU") for x in _ov_devices()
+                ):
+                    devices.append("Intel GPU")
+                devices.append("CPU")
             if kind == "gguf":
-                devices = ["NVIDIA-GPU", "CPU"]
-            npu_ok = (kind == "llm")           # symmetric-int4 LLM IR only
-            if npu_ok:
-                devices = ["NPU"] + devices
+                if _NVIDIA_AVAILABLE:
+                    devices.append("NVIDIA GPU")
+                devices.append("CPU")
             size = 0
             for root, _dirs, files in os.walk(d):
                 for f in files:
@@ -475,6 +509,7 @@ def edge_models():
                 "size_gb": round(size / 1e9, 2),
                 "path": d,
                 "devices": devices,
+                "device_label": devices[0] if devices else "—",
                 "npu_compatible": npu_ok,
                 "backend": "llama.cpp" if kind == "gguf" else "openvino",
             })
