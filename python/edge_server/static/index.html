@@ -141,6 +141,7 @@
 
     <div class="tabs">
       <div class="tab active" data-view="chat" onclick="switchView('chat')">对话</div>
+      <div class="tab" data-view="projects" onclick="switchView('projects')">项目</div>
       <div class="tab" data-view="agent" onclick="switchView('agent')">Agent 工作区</div>
       <div class="tab" data-view="tiers" onclick="switchView('tiers')">三层方案</div>
       <div class="tab" data-view="models" onclick="switchView('models')">模型</div>
@@ -173,6 +174,47 @@
               <label><input type="checkbox" id="streamOn" checked> 流式输出</label>
               <label><input type="checkbox" id="agentOn"> Agent 模式（可操作文件）</label>
               <span id="chatHint">本地 OpenVINO 引擎</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PROJECTS -->
+      <div class="view" id="view-projects" style="display:none">
+        <div class="panel" style="max-width:1100px">
+          <div class="sec">
+            <h3>项目</h3>
+            <div class="desc">用对话/项目为单位管理开发：每个项目是独立文件夹，可建沙箱、装依赖、写代码、跑程序。</div>
+            <div class="frow">
+              <input type="text" id="newProjName" placeholder="新项目名，如：数据清洗工具" style="flex:1">
+              <select id="newProjTpl" style="min-width:120px">
+                <option value="empty">空白</option>
+                <option value="python">Python</option>
+              </select>
+              <button class="btn primary" onclick="createProject()">创建项目</button>
+            </div>
+            <div id="projList" style="margin-top:10px"></div>
+          </div>
+
+          <div class="row" style="display:grid;grid-template-columns:300px 1fr;gap:16px">
+            <div class="sec" style="margin:0">
+              <h3>文件树</h3>
+              <div class="desc mono" id="projCur" style="font-size:11.5px">–</div>
+              <div id="fileTree" style="max-height:420px;overflow:auto;font-size:13px"></div>
+            </div>
+            <div class="sec" style="margin:0;display:flex;flex-direction:column">
+              <h3 style="display:flex;align-items:center;gap:10px">
+                编辑 <span class="mono" id="editPath" style="font-weight:400;color:var(--dim);font-size:12px">(未打开文件)</span>
+                <span style="flex:1"></span>
+                <button class="btn" onclick="saveFile()" id="saveBtn" disabled>保存</button>
+              </h3>
+              <textarea id="fileEditor" style="width:100%;height:300px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;border:1px solid var(--line);border-radius:8px;padding:10px;resize:vertical" placeholder="点击左侧文件打开…"></textarea>
+              <div class="desc" style="margin:10px 0 6px">沙箱终端（在项目内执行命令，如 <code>pip install requests</code>、<code>python src/main.py</code>）</div>
+              <div class="box" style="margin-bottom:8px">
+                <input type="text" id="cmdInput" placeholder="pip install requests" style="flex:1;border:none;background:transparent" onkeydown="if(event.key==='Enter')runSandbox()">
+                <button class="send" onclick="runSandbox()">执行</button>
+              </div>
+              <pre class="log" id="cmdOut" style="max-height:200px">（沙箱输出会显示在这里）</pre>
             </div>
           </div>
         </div>
@@ -526,11 +568,85 @@ function toggleExternal(){
 }
 function switchView(v){
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.view===v));
-  ["chat","agent","tiers","models","settings"].forEach(x=>$("view-"+x).style.display=x===v?(x==="chat"?"flex":"block"):"none");
-  $("viewTitle").textContent={chat:"对话",agent:"Agent 工作区",tiers:"三层方案",models:"模型",settings:"设置"}[v];
+  ["chat","projects","agent","tiers","models","settings"].forEach(x=>$("view-"+x).style.display=x===v?(x==="chat"?"flex":"block"):"none");
+  $("viewTitle").textContent={chat:"对话",projects:"项目",agent:"Agent 工作区",tiers:"三层方案",models:"模型",settings:"设置"}[v];
   if(v==="tiers") runPlan();
   if(v==="models") loadModels();
   if(v==="agent") loadWs();
+  if(v==="projects") loadProjects();
+}
+
+// ============ 项目 ============
+async function loadProjects(){
+  try{
+    const j=await (await fetch(API+"/project/list")).json();
+    $("projCur").textContent="当前："+(j.current||".");
+    const box=$("projList"); box.innerHTML="";
+    (j.projects||[]).forEach(p=>{
+      const d=document.createElement("div"); d.className="frow";
+      d.innerHTML=`<div class="lbl">📁 ${esc(p.name)}<small>${p.files} 文件${p.has_venv?" · 已有沙箱":""} · ${esc(p.created||"")}</small></div>
+        <button class="btn" onclick="openProject('${esc(p.name)}')">打开</button>`;
+      box.appendChild(d);
+    });
+    if(!j.projects||!j.projects.length) box.innerHTML='<div class="cap" style="color:var(--dim);font-size:12.5px">暂无项目，先在上方创建一个。</div>';
+    loadTree();
+  }catch(e){ $("projList").innerHTML='<div class="cap">读取失败：'+esc(e.message)+'</div>'; }
+}
+async function createProject(){
+  const name=$("newProjName").value.trim(); if(!name){toast("请输入项目名");return}
+  const tpl=$("newProjTpl").value;
+  try{
+    const j=await (await fetch(API+"/project/create?name="+encodeURIComponent(name)+"&template="+tpl,{method:"POST"})).json();
+    toast(j.message||"已创建"); $("newProjName").value=""; loadProjects();
+  }catch(e){ toast("创建失败："+e.message); }
+}
+async function openProject(name){
+  try{ await fetch(API+"/project/open?name="+encodeURIComponent(name),{method:"POST"}); toast("已打开 "+name); loadProjects(); }
+  catch(e){ toast("打开失败："+e.message); }
+}
+async function loadTree(){
+  const cur=($("projCur").textContent||"").replace("当前：","")||".";
+  try{
+    const j=await (await fetch(API+"/project/tree?path="+encodeURIComponent(cur))).json();
+    $("fileTree").innerHTML=renderTree(j.tree||[],0);
+  }catch(e){ $("fileTree").textContent="读取失败："+e.message; }
+}
+function renderTree(nodes,depth){
+  let h="";
+  nodes.forEach(n=>{
+    const pad=10+depth*14;
+    if(n.type==="dir"){
+      h+=`<div style="padding:4px 0 4px ${pad}px;color:var(--dim)">📁 ${esc(n.name)}${n.skipped?" (已跳过)":""}</div>`;
+      if(n.children) h+=renderTree(n.children,depth+1);
+    }else{
+      h+=`<div style="padding:4px 0 4px ${pad}px;cursor:pointer" onclick="openFile('${esc(n.path)}')">📄 ${esc(n.name)} <span style="color:var(--dim);font-size:11px">${n.size||0}B</span></div>`;
+    }
+  });
+  return h;
+}
+async function openFile(path){
+  try{
+    const j=await (await fetch(API+"/project/file?path="+encodeURIComponent(path))).json();
+    $("fileEditor").value=j.content||""; $("editPath").textContent=path; $("saveBtn").disabled=false;
+    $("fileEditor").dataset.path=path;
+  }catch(e){ toast("打开失败："+e.message); }
+}
+async function saveFile(){
+  const path=$("fileEditor").dataset.path; if(!path) return;
+  try{
+    await fetch(API+"/project/file",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({path,content:$("fileEditor").value})});
+    toast("已保存 "+path); loadTree();
+  }catch(e){ toast("保存失败："+e.message); }
+}
+async function runSandbox(){
+  const cmd=$("cmdInput").value.trim(); if(!cmd) return;
+  $("cmdOut").textContent="$ "+cmd+"\n运行中…";
+  try{
+    const j=await (await fetch(API+"/agent/sandbox_run?cmd="+encodeURIComponent(cmd),{method:"POST"})).json();
+    $("cmdOut").textContent="$ "+cmd+"\n"+(j.output||JSON.stringify(j));
+    loadTree();
+  }catch(e){ $("cmdOut").textContent="执行失败："+e.message; }
 }
 
 (function init(){

@@ -8,10 +8,32 @@
 ## [Unreleased]
 
 ### Planned
-- 原生 Windows 应用：项目化 Agent 工作流（按对话/项目自动建项目文件夹、沙箱 venv、依赖安装）
 - Intel Arc iGPU 后端（Vulkan / SYCL）
 - 100B+ MoE 分层参数支持
 - Tauri 安装包（NSIS / WiX）
+
+## [0.2.0] - 2026-11-20
+
+项目化 Agent 工作流：把"单一沙箱"升级为多项目开发环境。
+
+### Added
+- **项目管理**：`create_project` / `open_project` / `list_projects` 工具，
+  每个项目独立文件夹（含 `src/ data/ output/ notes/` 结构 + `.edge-project.json` 元数据），
+  支持 `empty` / `python` 模板。
+- **项目沙箱**：`sandbox_setup` 在项目内创建 Python venv（`.venv/`），
+  `sandbox_run` 用沙箱解释器执行命令（`pip install`、`python xxx.py` 等）。
+- **文件编辑工具**：`edit_file`（查找替换）、`append_file`（追加）。
+- **GUI「项目」视图**：项目列表 + 文件树浏览 + 文件编辑器（打开/保存）+
+  沙箱终端（在项目内跑命令）。
+- 项目 HTTP 端点：`/project/list`、`/project/create`、`/project/open`、
+  `/project/tree`、`/project/file`（GET/POST）、`/agent/sandbox_run`、
+  `/project/sandbox_setup`。
+- Agent 循环改进：保留完整工具调用/结果历史（scratchpad），多步任务更可靠；
+  最终答复自动剥离 Qwen3 的 `think` 块。
+
+### Changed
+- `run_command` 白名单扩展为开发类命令（python/pip/git/npm/node/cargo/go/dotnet…），
+  工作目录始终限定在项目内。
 
 ## [0.1.0] - 2026-11-20
 
@@ -33,10 +55,10 @@
 - **流式输出**：`/v1/chat/completions` 支持 `stream=true`（OpenAI 兼容 SSE）
 
 **本地 Agent（WorkBuddy 式）**
-- `agent_tools.py`：9 个文件系统工具（创建任务文件夹、读写文件、搜索、执行命令等），
+- `agent_tools.py`：文件系统工具（创建任务文件夹、读写文件、搜索、执行命令等），
   带 `workspace/` 沙箱隔离
 - 端点：`/agent/chat`（工具循环）、`/agent/workspace`、`/agent/list`
-- GUI 新增「Agent 工作区」视图，可自然语言下达任务并可视化执行步骤
+- GUI「Agent 工作区」视图，可自然语言下达任务并可视化执行步骤
 
 **服务与界面**
 - OpenAI 兼容服务（`openai_server.py`，FastAPI）：`/v1/chat/completions`、
@@ -56,5 +78,6 @@
 - Tauri windows-gnu 工具链 `dlltool` 缺失 → 改用完整 MinGW-w64
 - Tauri v2 命令宏命名冲突 → 命令移入 `commands.rs` 子模块
 
-[Unreleased]: https://github.com/OWNER/edge-infer/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/OWNER/edge-infer/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/OWNER/edge-infer/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/OWNER/edge-infer/releases/tag/v0.1.0

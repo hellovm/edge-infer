@@ -159,31 +159,36 @@ cargo build --release          # 产出 target/release/edge-gui.exe
 
 ---
 
-## 🤖 本地 Agent
+## 🤖 本地 Agent（项目化开发）
 
-工作台「Agent 工作区」标签页：用自然语言下达任务，模型会自主调用工具
-**真正在磁盘上创建项目/任务文件夹、读写文件、搜索、执行命令**。
+工作台「项目」与「Agent 工作区」标签页：用自然语言下达开发任务，模型会自主调用工具
+**真正在磁盘上创建项目、写代码、建沙箱、装依赖、跑程序**。
 
 可用工具：
 
 | 工具 | 说明 |
 |---|---|
-| `list_dir` | 列出目录内容 |
-| `read_file` | 读取文本文件 |
-| `write_file` | 写入/覆盖文件 |
-| `make_dir` | 创建目录 |
-| `create_task_folder` | 创建任务文件夹（含 input/output/notes） |
-| `search` | 按正则搜索文件内容 |
-| `run_command` | 在项目目录内运行只读/开发类命令 |
-| `cd` | 切换当前目录 |
-| `get_workspace` | 查看工作区信息 |
+| `create_project` | 创建项目文件夹（含 `src/data/output/notes`），支持 empty/python 模板 |
+| `open_project` / `list_projects` | 打开 / 列出项目 |
+| `sandbox_setup` | 在项目内创建 Python venv 沙箱（`.venv/`） |
+| `sandbox_run` | 在沙箱内执行命令（`pip install ...` / `python xxx.py`） |
+| `read_file` / `write_file` | 读取 / 写入文件 |
+| `edit_file` / `append_file` | 查找替换 / 追加 |
+| `list_dir` / `make_dir` / `search` | 目录与搜索 |
+| `run_command` / `cd` / `get_workspace` | 开发命令 / 切目录 / 工作区信息 |
+
+**典型工作流**（已实测通过）：
 
 ```bash
-# 让 Agent 创建一个任务文件夹
 curl -X POST http://127.0.0.1:8080/agent/chat \
   -H "Content-Type: application/json" \
-  -d '{"message":"创建一个名为 演示任务 的任务文件夹","max_steps":3}'
+  -d '{"message":"创建一个 Python 项目「斐波那契」，写一个打印前10个斐波那契数的程序并运行","max_steps":6}'
 ```
+
+Agent 会自动：`create_project` → `write_file` → `sandbox_setup` → `sandbox_run`
+→ 在磁盘上真出现项目文件夹并输出运行结果。
+
+GUI 的「项目」视图提供：项目列表、文件树、文件编辑器（打开/保存）、沙箱终端。
 
 > 所有操作被限制在 `workspace/` 沙箱内，越权路径会被拒绝。
 > Agent 需要指令遵循较强的模型，**建议用 8B**（1.5B 太弱）。

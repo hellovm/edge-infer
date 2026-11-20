@@ -15,6 +15,7 @@ Auth:
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
@@ -512,6 +513,132 @@ def agent_list(path: str = "."):
     return {"path": path, "content": _ws.list_dir(path)}
 
 
+# ---- project management ---------------------------------------------------
+@app.get("/project/list")
+def project_list():
+    if not _AGENT_AVAILABLE:
+        raise HTTPException(503, "agent tools unavailable")
+    projs = []
+    pd = _ws._projects_dir()
+    for c in sorted(pd.iterdir()):
+        if c.is_dir():
+            nfiles = sum(1 for _ in c.rglob("*") if _.is_file())
+            meta = c / ".edge-project.json"
+            projs.append({
+                "name": c.name, "files": nfiles,
+                "has_venv": (c / ".venv").exists(),
+                "created": (json.loads(meta.read_text(encoding="utf-8")).get("created")
+                            if meta.exists() else ""),
+            })
+    return {"projects": projs, "current": str(_ws.current.relative_to(_ws.root))}
+
+
+@app.post("/project/create")
+def project_create(name: str, template: str = "empty"):
+    if not _AGENT_AVAILABLE:
+        raise HTTPException(503, "agent tools unavailable")
+    return {"ok": True, "message": _ws.create_project(name, template),
+            "current": str(_ws.current.relative_to(_ws.root))}
+
+
+@app.post("/project/open")
+def project_open(name: str):
+    if not _AGENT_AVAILABLE:
+        raise HTTPException(503, "agent tools unavailable")
+    return {"ok": True, "message": _ws.open_project(name),
+            "current": str(_ws.current.relative_to(_ws.root))}
+
+
+@app.get("/project/tree")
+def project_tree(path: str = "."):
+    """Recursive project tree (dirs + files), for the GUI file explorer.
+
+    `path` is resolved relative to the *workspace root* (e.g. "projects/foo").
+    """
+    if not _AGENT_AVAILABLE:
+        raise HTTPException(503, "agent tools unavailable")
+
+    def walk(p, rel="", depth=0):
+        if depth > 4:
+            return []
+        out = []
+        try:
+            for c in sorted(p.iterdir()):
+                rp = f"{rel}/{c.name}".lstrip("/")
+                if c.name in (".venv", "__pycache__", "node_modules", ".git"):
+                    out.append({"name": c.name, "type": "dir", "path": rp, "skipped": True})
+                    continue
+                if c.is_dir():
+                    out.append({"name": c.name, "type": "dir", "path": rp,
+                                "children": walk(c, rp, depth + 1)})
+                else:
+                    out.append({"name": c.name, "type": "file", "path": rp,
+                                "size": c.stat().st_size})
+        except OSError:
+            pass
+        return out
+
+    # resolve from the workspace root (not the current dir)
+    base = (_ws.root / path).resolve()
+    try:
+        base.relative_to(_ws.root)
+    except ValueError:
+        raise HTTPException(400, "path escapes workspace")
+    if not base.is_dir():
+        return {"root": path, "tree": []}
+    return {"root": path, "tree": walk(base)}
+
+
+@app.get("/project/file")
+def project_file(path: str):
+    """Read a file's content for the editor (path is workspace-root relative)."""
+    if not _AGENT_AVAILABLE:
+        raise HTTPException(503, "agent tools unavailable")
+    p = (_ws.root / path).resolve()
+    try:
+        p.relative_to(_ws.root)
+    except ValueError:
+        raise HTTPException(400, "path escapes workspace")
+    if not p.is_file():
+        return {"path": path, "content": ""}
+    return {"path": path, "content": _ws.read_file(path)}
+
+
+class WriteFileReq(BaseModel):
+    path: str
+    content: str
+
+
+@app.post("/project/file")
+def project_file_write(req: WriteFileReq):
+    """Save file content from the editor (path is workspace-root relative)."""
+    if not _AGENT_AVAILABLE:
+        raise HTTPException(503, "agent tools unavailable")
+    p = (_ws.root / req.path).resolve()
+    try:
+        p.relative_to(_ws.root)
+    except ValueError:
+        raise HTTPException(400, "path escapes workspace")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(req.content, encoding="utf-8")
+    return {"ok": True, "message": f"已保存 {req.path} ({len(req.content)} 字符)"}
+
+
+@app.post("/agent/sandbox_run")
+def agent_sandbox_run(cmd: str):
+    """Run a command inside the current project's sandbox (used by the GUI)."""
+    if not _AGENT_AVAILABLE:
+        raise HTTPException(503, "agent tools unavailable")
+    return {"ok": True, "output": _ws.sandbox_run(cmd)}
+
+
+@app.post("/project/sandbox_setup")
+def project_sandbox_setup():
+    if not _AGENT_AVAILABLE:
+        raise HTTPException(503, "agent tools unavailable")
+    return {"ok": True, "message": _ws.sandbox_setup()}
+
+
 @app.post("/agent/chat")
 def agent_chat(req: AgentRequest):
     """Run a tool-using agent loop: model decides tools -> execute -> repeat."""
@@ -525,24 +652,37 @@ def agent_chat(req: AgentRequest):
     _genai.load(DEFAULT_MODEL_DIR, device=DEFAULT_DEVICE,
                 cache_dir=os.path.join(DEFAULT_MODEL_DIR, ".npu_cache", DEFAULT_DEVICE))
 
-    system = ("你是一个本地文件助手，可以创建任务文件夹、读写文件。\n"
+    system = ("你是一个本地项目开发助手，能创建项目、写代码、建沙箱、装依赖、跑程序。\n"
               + tools_prompt())
-    ctx = req.message
     steps = []
+    # Keep a growing scratchpad so the model sees the full tool history.
+    scratch = f"用户任务：{req.message}\n"
     for _ in range(req.max_steps):
-        resp = _genai.chat(ctx, system=system, max_new_tokens=req.max_tokens, temperature=0.0)
+        resp = _genai.chat(scratch, system=system,
+                           max_new_tokens=req.max_tokens, temperature=0.0)
         text = resp.text
         call = parse_tool_call(text)
         if not call:
-            return {"steps": steps, "answer": text, "workspace": str(_ws.root)}
+            return {"steps": steps, "answer": _strip_think(text),
+                    "workspace": str(_ws.current)}
         name = call.get("name")
         args = call.get("arguments", {}) or {}
         result = run_tool(_ws, name, args)
         steps.append({"tool": name, "arguments": args, "result": result})
-        # feed the result back and let the model continue
-        ctx = (f"{ctx}\n\n[你调用了 {name}，结果如下]\n<tool_result>\n{result}\n</tool_result>\n"
-               f"请继续：如已完成请直接给出最终答复（不要再包含 <tool_call>）。")
-    return {"steps": steps, "answer": "（达到最大步骤数）", "workspace": str(_ws.root)}
+        scratch += (f"\n[调用 {name}({json.dumps(args, ensure_ascii=False)})]\n"
+                    f"<tool_result>\n{result}\n</tool_result>\n")
+        if name == "get_workspace":
+            scratch += "继续下一步。\n"
+    return {"steps": steps, "answer": "（达到最大步骤数，任务可能未完成）",
+            "workspace": str(_ws.current)}
+
+
+def _strip_think(text: str) -> str:
+    """Remove Qwen3  thinking... response blocks from the final answer."""
+    import re as _re
+    pat = r"<think.*?</think>"
+    text = _re.sub(pat, "", text, flags=_re.DOTALL)
+    return text.strip()
 
 
 # ---------------------------------------------------------------------------
