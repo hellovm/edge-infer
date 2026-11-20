@@ -28,6 +28,8 @@ Agent 工作台**（可真正操作文件系统、创建项目文件夹、执行
 - **纯 OpenVINO 推理链路** — 不依赖 torch / transformers，只用 `openvino` +
   `tokenizers` + `numpy`，绕开版本地狱（VLM 路径）。
 - **OpenVINO GenAI 后端** — `LLMPipeline` 驱动 NPU/GPU/CPU，支持 **SSE 流式输出**。
+- **llama.cpp 后端** — 运行 GGUF 模型，覆盖 OpenVINO IR 无法承载的更大 MoE
+  （80B-A3B 及以上）；用 `--n-cpu-moe` 把 MoE 层放到 CPU/内存实现三层卸载。
 - **本地 Agent** — 模型可自主调用工具：创建任务文件夹、
   读写文件、搜索、执行命令；全部限制在沙箱工作区内。
 - **OpenAI 兼容 API** — 对外暴露 `/v1/chat/completions`（含 `stream=true`），
