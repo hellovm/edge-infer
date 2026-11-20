@@ -273,6 +273,7 @@ class ChatRequest(BaseModel):
     enable_thinking: bool = False         # Qwen3 thinking mode
     attachments: List[dict] = []          # [{name, content}] inline text files
     images: List[str] = []                # [{data_url}] inline images (VLM)
+    web_search: bool = False              # search the web and inject results
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +483,21 @@ def edge_catalog(device: Optional[str] = None):
         return {"models": out}
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"catalog error: {e}")
+
+
+@app.get("/edge/search")
+def edge_search(q: str, n: int = 5):
+    """Run a web search via browser automation (returns titles/urls/snippets)."""
+    try:
+        from .web_search import search_web, available
+
+        if not available():
+            raise HTTPException(503, "playwright 未安装，联网搜索不可用")
+        return {"ok": True, "query": q, "results": search_web(q, max_results=n)}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"search error: {e}")
 
 
 @app.get("/edge/models")
@@ -732,6 +748,19 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
             content = a.get("content", "")
             extra.append(f"\n\n[附件 {name}]\n{content[:6000]}")
         user = user + "".join(extra)
+
+    # Optional web search: fetch fresh results and inject them into the prompt.
+    if req.web_search:
+        try:
+            from . import web_search as _ws_mod
+
+            hits = _ws_mod.search_web(user, max_results=5)
+            block = _ws_mod.format_results(hits)
+            if block:
+                user = (f"{block}\n\n请基于以上联网搜索结果回答下面的问题；"
+                        f"若结果不相关，请说明并凭已有知识作答。\n\n【用户问题】\n{user}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[edge-infer] web search failed: {e}")
 
     # Resolve the per-request model (falls back to the server default).
     model_dir = _resolve_model_dir(req.model_id)

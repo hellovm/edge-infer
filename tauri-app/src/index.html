@@ -60,6 +60,19 @@
     border:1px solid var(--line);background:#fff;color:var(--dim)}
   .chip.on{color:var(--ok);border-color:rgba(18,183,106,.35);background:rgba(18,183,106,.06)}
   .chip.off{color:var(--err);border-color:rgba(239,68,68,.35);background:rgba(239,68,68,.06)}
+  .chip.clickable{cursor:pointer;user-select:none}
+  .chip.clickable:hover{border-color:var(--brand);color:var(--brand)}
+  .chip.clickable::after{content:"▾";font-size:9px;opacity:.6}
+  .devmenu{position:absolute;top:34px;right:0;background:#fff;border:1px solid var(--line);border-radius:12px;
+    box-shadow:0 12px 34px rgba(16,24,40,.16);padding:6px;min-width:250px;display:none;z-index:50}
+  .devmenu.show{display:block}
+  .devmenu .dm{display:flex;align-items:flex-start;gap:9px;padding:9px 10px;border-radius:8px;cursor:pointer}
+  .devmenu .dm:hover{background:var(--panel2)}
+  .devmenu .dm.sel{background:var(--brand-soft)}
+  .devmenu .dm .dot{width:9px;height:9px;border-radius:50%;margin-top:5px;flex:none}
+  .devmenu .dm .tt{font-size:13px;font-weight:550}
+  .devmenu .dm small{display:block;color:var(--dim);font-size:11px;margin-top:1px}
+  .devmenu .dm .cur{margin-left:auto;font-size:10px;color:var(--ok);font-weight:600}
   .viewwrap{flex:1;overflow:auto;min-height:0}
 
   /* ---------- chat ---------- */
@@ -208,6 +221,7 @@
   .mcard2 .alt a{color:var(--brand);cursor:pointer;text-decoration:underline dotted}
   .mcard2 .btn.loading{opacity:.6;pointer-events:none}
   #catHint{grid-column:1/-1}
+  .devpill{font-size:11px;font-weight:500;padding:2px 9px;border-radius:99px;background:var(--brand-soft);color:var(--brand);vertical-align:middle;margin-left:6px}
   .mcard.loading{opacity:.6;pointer-events:none}
   ::-webkit-scrollbar{width:9px;height:9px}
   ::-webkit-scrollbar-thumb{background:#d5d9e0;border-radius:5px;border:2px solid transparent;background-clip:content-box}
@@ -241,7 +255,10 @@
     <div class="topbar">
       <div class="title" id="chatTitle">对话</div>
       <div class="spacer"></div>
-      <span class="chip" id="chipDevice">设备 –</span>
+      <span style="position:relative">
+        <span class="chip clickable" id="chipDevice" onclick="toggleDevMenu(event)" title="点击切换推理设备">设备 –</span>
+        <div class="devmenu" id="devMenu"></div>
+      </span>
       <span class="chip" id="chipSvc">服务 –</span>
     </div>
 
@@ -280,6 +297,7 @@
               <label><input type="checkbox" id="streamOn" checked> 流式输出</label>
               <label><input type="checkbox" id="thinkOn"> 思考模式</label>
               <label><input type="checkbox" id="agentOn"> Agent 模式</label>
+              <label><input type="checkbox" id="webOn"> 🌐 联网搜索</label>
               <span id="statLine" class="mono"></span>
             </div>
           </div>
@@ -376,9 +394,35 @@ async function loadHealth(){
 async function loadDeviceChip(){
   try{ const j=await (await fetch(API+"/edge/device/current")).json();
     state.loadedDevice=j.loaded_on;
-    $("chipDevice").textContent="设备："+(j.loaded_on||j.device||"–");
   }catch(e){}
+  $("chipDevice").textContent="设备："+(DEV_SHORT[state.device]||"–");
 }
+const DEV_SHORT={"auto":"自动","NVIDIA-GPU":"NVIDIA GPU","Intel-GPU":"Intel GPU","NPU":"NPU","CPU":"CPU"};
+const DEV_OPTS=[
+  {id:"auto",label:"自动选择",cap:"按模型自动路由到最合适的后端",color:"var(--brand)"},
+  {id:"NVIDIA-GPU",label:"NVIDIA GPU",cap:"CUDA · 大 MoE 三层卸载（实测最快）",color:"var(--nvidia)"},
+  {id:"Intel-GPU",label:"Intel GPU",cap:"OpenVINO · Arc 核显加速",color:"var(--cpu)"},
+  {id:"NPU",label:"Intel NPU",cap:"OpenVINO · 低功耗小模型",color:"var(--npu)"},
+  {id:"CPU",label:"CPU",cap:"通用回退",color:"#64748b"},
+];
+async function toggleDevMenu(e){
+  if(e) e.stopPropagation();
+  const m=$("devMenu"); const show=!m.classList.contains("show");
+  if(!show){ m.classList.remove("show"); return; }
+  let avail=[];
+  try{ const j=await (await fetch(API+"/edge/devices")).json(); avail=j.openvino_devices||[]; }catch(e){}
+  m.innerHTML=DEV_OPTS.map(o=>{
+    const sel=state.device===o.id;
+    const cur=sel?'<span class="cur">当前</span>':'';
+    return `<div class="dm${sel?" sel":""}" onclick="pickDevice('${o.id}')">
+      <span class="dot" style="background:${o.color}"></span>
+      <span style="flex:1"><span class="tt">${o.label}</span><small>${o.cap}</small></span>${cur}
+    </div>`;
+  }).join("");
+  m.classList.add("show");
+}
+function pickDevice(id){ $("devMenu").classList.remove("show"); const o=DEV_OPTS.find(x=>x.id===id); selectDevice(id,o?o.label:id); }
+document.addEventListener("click",e=>{ if(!e.target.closest("#devMenu") && !e.target.closest("#chipDevice")) $("devMenu")?.classList.remove("show"); });
 
 function renderConvs(){
   const box=$("convList"); box.innerHTML="";
@@ -545,7 +589,7 @@ function toggleModelMenu(e){ if(e) e.stopPropagation(); toggleModelMenuPane(); }
 async function send(){
   if(state.busy) return;
   const t=$("prompt").value.trim(); if(!t && !state.attachments.length) return;
-  state.agentMode=$("agentOn").checked; state.thinking=$("thinkOn").checked;
+  state.agentMode=$("agentOn").checked; state.thinking=$("thinkOn").checked; state.webSearch=($("webOn")||{}).checked||false;
   let c=curConv(); if(!c){ newChat(); c=curConv(); }
   const atts=state.attachments.slice();
   if(c.msgs.length===0){ c.title=t.slice(0,18)||(atts[0]?.name||"新对话"); renderConvs(); }
@@ -598,7 +642,7 @@ async function send(){
       body.classList.remove("cursor"); body.textContent=text;
     } else if(state.stream && !state.useExternal){
       const payload={model:"qwen",model_id:state.modelId,messages:[{role:"user",content:t}],max_tokens:512,temperature:0,stream:true,
-        device:state.device,enable_thinking:state.thinking,
+        device:state.device,enable_thinking:state.thinking,web_search:!!state.webSearch,
         attachments:atts.filter(a=>a.kind!=="image").map(a=>({name:a.name,content:a.content})),
         images:atts.filter(a=>a.kind==="image"&&a.image).map(a=>a.image)};
       const resp=await fetch(API+"/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
@@ -634,7 +678,7 @@ async function send(){
       }else{
         url=API+"/v1/chat/completions";
         payload={model:"qwen",model_id:state.modelId,messages:[{role:"user",content:t}],max_tokens:512,temperature:0,
-          device:state.device,enable_thinking:state.thinking,
+          device:state.device,enable_thinking:state.thinking,web_search:!!state.webSearch,
           attachments:atts.filter(a=>a.kind!=="image").map(a=>({name:a.name,content:a.content})),
           images:atts.filter(a=>a.kind==="image"&&a.image).map(a=>a.image)};
       }
@@ -761,13 +805,14 @@ const PANELS={
   models:()=>`
     <div class="panel">
       <div class="sec">
-        <h3>推荐模型</h3>
-        <div class="desc">按模型展示，自动匹配当前设备的格式（NVIDIA → GGUF/llama.cpp、Intel → OpenVINO IR）。点击下载即可，无需手动挑文件。</div>
+        <h3>支持的模型 <span class="devpill" id="catDevPill">当前设备</span></h3>
+        <div class="desc">按当前推理设备列出可用的模型清单。已下载的会标记 ✓；未下载的点击即可下载。</div>
         <div id="catalog" class="catalog"></div>
       </div>
       <div class="sec"><h3>已安装模型</h3><div id="modelList"></div></div>
       <div class="sec"><h3>自定义下载</h3>
         <div class="frow"><input type="text" id="modelRepo" placeholder="owner/repo" style="flex:1"><button class="btn primary" onclick="downloadModel()">下载</button></div>
+        <input type="text" id="modelFiles" placeholder="文件白名单（可选，逗号分隔，如 *Q4_K_M.gguf）" style="width:100%;margin-top:8px">
         <div class="desc mono" id="dlStatus" style="margin-top:10px"></div></div>
     </div>`,
   settings:()=>`
@@ -890,59 +935,84 @@ async function loadModels(){ try{ const j=await (await fetch(API+"/edge/models")
 const DEV_LABEL={nvidia:["NVIDIA GPU","var(--nvidia)","#76b900"],"intel-gpu":["Intel GPU","var(--cpu)","#8b5cf6"],npu:["Intel NPU","var(--npu)","#2f8fff"]};
 const DEV_KEY_OF={"NVIDIA-GPU":"nvidia","nvidia":"nvidia","Intel-GPU":"intel-gpu","intel-gpu":"intel-gpu","NPU":"npu","npu":"npu"};
 let CATALOG=[];
+let _DOWNLOADS={};
+let INSTALLED=new Set();
 function curDevKey(){ return DEV_KEY_OF[state.device]||null; }
 async function loadCatalog(){
   const box=$("catalog"); if(!box) return;
-  box.innerHTML='<div style="color:var(--dim);font-size:12.5px">加载推荐模型…</div>';
+  box.innerHTML='<div style="color:var(--dim);font-size:12.5px">加载支持的模型…</div>';
   try{
     const sel=curDevKey();
-    const j=await (await fetch(API+"/edge/catalog"+(sel?"?device="+encodeURIComponent(state.device):""))).json();
-    CATALOG=j.models||[];
+    const [cj, dj]=await Promise.all([
+      fetch(API+"/edge/catalog"+(sel?"?device="+encodeURIComponent(state.device):"")).then(r=>r.json()),
+      fetch(API+"/edge/downloads").then(r=>r.json()).catch(()=>({downloads:{}})),
+    ]);
+    CATALOG=cj.models||[];          // 后端已算好每个变体的 installed
+    _DOWNLOADS=dj.downloads||{};
     renderCatalog();
   }catch(e){ box.innerHTML='<div style="color:var(--dim)">加载失败：'+esc(e.message)+'</div>'; }
 }
 function renderCatalog(){
   const box=$("catalog"); if(!box) return;
-  if(!CATALOG.length){ box.innerHTML='<div style="color:var(--dim)">暂无推荐</div>'; return; }
+  if(!CATALOG.length){ box.innerHTML='<div style="color:var(--dim)">暂无支持的模型</div>'; return; }
   const sel=curDevKey();
-  box.innerHTML=CATALOG.map((m,mi)=>{
+  const pill=$("catDevPill"); if(pill) pill.textContent=sel? (DEV_LABEL[sel][0]) : "未选设备";
+  box.innerHTML=CATALOG.map(m=>{
     const v=m.recommended||m.variants[0];
     const filesAttr=v.files?esc(v.files.join(",")):"";
     const mmTag=m.mm?'<span class="tg">多模态</span>':'';
     const actTag=(m.active&&m.active!==m.params)?`<span class="tg">激活 ${m.active}</span>`:'';
     const devTag=`<span class="tg tgdev">${esc(v.device_label)}</span>`;
-    const others=m.variants.length>1?`<div class="alt">也支持：${m.variants.filter(x=>x!==v).map(x=>`<a onclick="event.stopPropagation();dlVariant('${esc(x.repo)}','${x.files?esc(x.files.join(",")):""}')">${esc(x.device_label)} (${x.quant})</a>`).join("、")}</div>`:"";
+    const dl=_DOWNLOADS[v.repo];
+    const running = dl && dl.state==="running";
+    const done = v.installed || (dl && dl.state==="done");
+    const err = dl && dl.state==="error";
+    let btn;
+    if(running) btn=`<button class="btn" disabled style="margin-top:9px;width:100%">下载中…</button>`;
+    else if(done) btn=`<button class="btn" disabled style="margin-top:9px;width:100%;color:var(--ok)">✓ 已下载（${v.size_gb} GB）</button>`;
+    else btn=`<button class="btn primary" style="margin-top:9px;width:100%" onclick="dlVariant('${esc(v.repo)}','${filesAttr}',this)">下载 ${v.size_gb} GB</button>`;
+    const others=m.variants.length>1?`<div class="alt">其它设备格式：${m.variants.filter(x=>x!==v).map(x=>`<a onclick="event.stopPropagation();dlVariant('${esc(x.repo)}','${x.files?esc(x.files.join(",")):""}')">${esc(x.device_label)}（${esc(x.quant)}）</a>`).join("、")}</div>`:"";
     return `<div class="mcard2">
-      ${v.installed?'<span class="installed">✓ 已安装</span>':''}
+      ${done?'<span class="installed">✓ 已下载</span>':''}
       <div class="mt">${esc(m.name)}</div>
       <div class="mtags"><span class="tg">${m.params}</span>${actTag}<span class="tg">${v.quant}</span><span class="tg">${v.size_gb} GB</span>${devTag}${mmTag}</div>
       <div class="mh">🧩 推荐规格：${esc(v.ram_hint||"")}</div>
       <div class="ms" style="margin-top:6px">${esc(m.note)}</div>
       <div class="ms mono" style="margin-top:4px;font-size:11px">${esc(v.repo)}</div>
+      ${err?'<div class="ms" style="color:var(--err);margin-top:4px">下载失败：'+esc(dl.error||"")+'</div>':''}
       ${others}
-      <button class="btn primary" style="margin-top:9px;width:100%" onclick="dlVariant('${esc(v.repo)}','${filesAttr}',this)">下载（${esc(v.device_label)} · ${esc(v.quant)}）</button>
+      ${btn}
     </div>`;
   }).join("");
-  if(!sel){
-    box.insertAdjacentHTML("afterend",'<div class="desc" id="catHint" style="margin-top:8px">提示：在「设置 → 加速设备」选择设备后，这里会自动匹配对应格式（NVIDIA→GGUF / Intel→OpenVINO）。</div>');
-  }else{
-    const h=$("catHint"); if(h) h.remove();
-  }
 }
 async function dlVariant(repo, files, el){
   if(el && el.classList.contains("loading")) return;
-  if(el) el.classList.add("loading");
+  if(el){ el.classList.add("loading"); el.textContent="下载中…"; }
   try{
     const f = files ? "&files="+encodeURIComponent(files) : "";
     await (await fetch(API+"/edge/download?repo="+encodeURIComponent(repo)+f,{method:"POST"})).json();
     toast("已开始下载 "+repo.split("/").pop()+"（体积较大，请耐心等待）");
     const st=$("dlStatus"); if(st) st.textContent="下载中："+repo;
-  }catch(e){ toast("下载请求失败："+e.message); }
-  if(el) el.classList.remove("loading");
+    pollDownloads();
+  }catch(e){ toast("下载请求失败："+e.message); if(el){el.classList.remove("loading");el.textContent="下载";} }
+}
+// 轮询下载状态，完成后刷新卡片
+let _dlTimer=null;
+async function pollDownloads(){
+  try{ const j=await (await fetch(API+"/edge/downloads")).json(); _DOWNLOADS=j.downloads||{}; }
+  catch(e){ _DOWNLOADS={}; }
+  renderCatalog(); loadModels();
+  const running=Object.values(_DOWNLOADS).some(d=>d.state==="running");
+  clearTimeout(_dlTimer);
+  if(running) _dlTimer=setTimeout(pollDownloads, 3000);
 }
 async function downloadModel(){ const repo=$("modelRepo").value.trim(); if(!repo){toast("请输入仓库 ID");return}
+  const files=($("modelFiles")||{}).value||"";
   $("dlStatus").textContent="请求下载 "+repo+" …";
-  try{ const j=await (await fetch(API+"/edge/download?repo="+encodeURIComponent(repo),{method:"POST"})).json(); $("dlStatus").textContent=j.message||JSON.stringify(j); toast("下载已提交"); loadModels(); }catch(e){ $("dlStatus").textContent="失败："+e.message; } }
+  try{ const f=files?"&files="+encodeURIComponent(files.trim()):"";
+    const j=await (await fetch(API+"/edge/download?repo="+encodeURIComponent(repo)+f,{method:"POST"})).json();
+    $("dlStatus").textContent=j.message||JSON.stringify(j); toast("下载已提交"); pollDownloads();
+  }catch(e){ $("dlStatus").textContent="失败："+e.message; } }
 
 function initSettings(){
   $("swExternal").classList.toggle("on",state.useExternal);
@@ -988,6 +1058,7 @@ function toggleExternal(){ state.useExternal=!state.useExternal; LS.write("useEx
   $("streamOn").checked=state.stream; $("thinkOn").checked=state.thinking; $("agentOn").checked=state.agentMode;
   $("streamOn").onchange=()=>{state.stream=$("streamOn").checked;LS.write("stream",state.stream)};
   $("thinkOn").onchange=()=>{state.thinking=$("thinkOn").checked;LS.write("thinking",state.thinking)};
+  if($("webOn")){ $("webOn").checked=LS.read("webSearch",false); state.webSearch=$("webOn").checked; $("webOn").onchange=()=>{state.webSearch=$("webOn").checked;LS.write("webSearch",state.webSearch)}; }
   $("agentOn").onchange=()=>{state.agentMode=$("agentOn").checked;LS.write("agentMode",state.agentMode)};
   if(state.convs.length) state.curConv=state.convs[state.convs.length-1].id;
   renderConvs(); renderChat(); renderAtts();

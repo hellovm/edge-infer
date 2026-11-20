@@ -130,15 +130,49 @@ class GenaiBackend:
 
     def _build_chat_prompt(self, content: str, system: str,
                            enable_thinking: bool) -> str:
-        """Assemble a Qwen-style chat prompt (/no_think when thinking off)."""
-        is_qwen3 = "qwen3" in (self._model_dir or "").lower()
-        parts = ""
-        if is_qwen3 and not enable_thinking:
-            parts += "/no_think\n"
+        """Assemble the prompt using the **model's own** chat template.
+
+        Earlier versions hand-wrote the Qwen ``<|im_start|>`` format for every
+        model. That breaks non-Qwen checkpoints (e.g. DeepSeek-R1 distills use
+        ``<｜User｜>``), which then see the markers as literal text and start
+        *talking about* "im_start"/"im_end" instead of answering.
+
+        So: ask the pipeline's tokenizer for its real template. Fall back to the
+        Qwen layout only if the tokenizer/template is unavailable.
+        """
+        msgs = []
         if system:
-            parts += f"<|im_start|>system\n{system}<|im_end|>\n"
-        parts += f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
-        return parts
+            msgs.append({"role": "system", "content": system})
+        msgs.append({"role": "user", "content": content})
+
+        prompt = ""
+        if self._pipe is not None:
+            try:
+                tok = self._pipe.get_tokenizer()
+                ctx = {"enable_thinking": bool(enable_thinking)}
+                try:
+                    prompt = tok.apply_chat_template(
+                        msgs, add_generation_prompt=True, extra_context=ctx
+                    )
+                except Exception:
+                    # Some templates don't accept extra_context → retry plain.
+                    prompt = tok.apply_chat_template(msgs, add_generation_prompt=True)
+            except Exception:  # noqa: BLE001
+                prompt = ""
+
+        if not prompt:
+            # Fallback: Qwen-style layout.
+            parts = ""
+            if system:
+                parts += f"<|im_start|>system\n{system}<|im_end|>\n"
+            parts += f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
+            prompt = parts
+
+        # Qwen3 soft thinking switch (harmless for templates that ignore it).
+        if not enable_thinking and "qwen3" in (self._model_dir or "").lower():
+            if "/no_think" not in prompt:
+                prompt = "/no_think\n" + prompt
+        return prompt
 
     def stream_chat(self, content: str, system: str = "", max_new_tokens: int = 256,
                     temperature: float = 0.0, enable_thinking: Optional[bool] = None):
