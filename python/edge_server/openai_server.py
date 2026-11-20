@@ -51,6 +51,15 @@ except Exception:
     llama_available = None  # type: ignore
     _LLAMA_AVAILABLE = False
 
+# VLM image path: OpenVINO GenAI VLMPipeline (handles the Qwen2VL image processor).
+try:
+    from .vlm_image import VlmImagePipeline, vlm_available
+    _VLM_AVAILABLE = True
+except Exception:
+    VlmImagePipeline = None  # type: ignore
+    vlm_available = None  # type: ignore
+    _VLM_AVAILABLE = False
+
 # Local agent tools (filesystem sandbox + tool loop).
 try:
     from .agent_tools import (
@@ -110,6 +119,7 @@ _gen = None  # lazily-loaded PureOVGenerator (VLM path)
 _gen_device: Optional[str] = None
 _genai = GenaiBackend() if _GENAI_AVAILABLE else None  # NPU/LLM path
 _llama = LlamaBackend() if _LLAMA_AVAILABLE else None  # GGUF path (llama.cpp)
+_vlm_img = None  # lazily-built VlmImagePipeline (VLM + images)
 _MODELS_DIR = os.path.join(_REPO_ROOT, "models")
 
 # Serve the GUI at "/" (works in a plain browser; the Tauri shell reuses the
@@ -134,6 +144,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     model: str = "qwen3-vl-4b-int4"
+    model_id: Optional[str] = None        # switch model per request (models/ <id>)
     messages: List[ChatMessage]
     max_tokens: int = Field(default=256, ge=1, le=8192)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
@@ -141,6 +152,7 @@ class ChatRequest(BaseModel):
     device: Optional[str] = None          # override EDGE_DEVICE per request
     enable_thinking: bool = False         # Qwen3 thinking mode
     attachments: List[dict] = []          # [{name, content}] inline text files
+    images: List[str] = []                # [{data_url}] inline images (VLM)
 
 
 # ---------------------------------------------------------------------------
@@ -330,27 +342,31 @@ def edge_catalog():
 
 @app.get("/edge/models")
 def edge_models():
+    """List locally installed models with backend / device hints.
+
+    The GUI uses `kind` + `devices` to build the per-device model picker.
+    """
     out = []
     if os.path.isdir(_MODELS_DIR):
         for name in sorted(os.listdir(_MODELS_DIR)):
             d = os.path.join(_MODELS_DIR, name)
             if not os.path.isdir(d):
                 continue
-            # Detect the layout / backend.
-            #   OpenVINO LLM -> openvino_model.xml            (NPU-able with sym int4)
-            #   OpenVINO VLM -> openvino_language_model.xml   (CPU/GPU)
-            #   GGUF         -> *.gguf                        (llama.cpp, 3-tier offload)
-            is_llm = os.path.exists(os.path.join(d, "openvino_model.xml"))
-            is_vlm = os.path.exists(os.path.join(d, "openvino_language_model.xml"))
-            has_gguf = any(f.endswith(".gguf") for f in os.listdir(d))
-            if has_gguf:
-                kind = "GGUF (llama.cpp)"
-            elif is_llm:
-                kind = "OpenVINO IR (LLM)"
-            elif is_vlm:
-                kind = "OpenVINO IR (VLM)"
-            else:
-                kind = "其他"
+            kind = _model_kind(d)          # gguf | llm | vlm | unknown
+            label = {
+                "gguf": "GGUF (llama.cpp)",
+                "llm": "OpenVINO IR (LLM)",
+                "vlm": "OpenVINO IR (VLM)",
+            }.get(kind, "其他")
+            # Which accelerators can actually run this model?
+            devices = []
+            if kind in ("llm", "vlm"):
+                devices = ["CPU", "GPU"]       # OpenVINO device plugins
+            if kind == "gguf":
+                devices = ["NVIDIA-GPU", "CPU"]
+            npu_ok = (kind == "llm")           # symmetric-int4 LLM IR only
+            if npu_ok:
+                devices = ["NPU"] + devices
             size = 0
             for root, _dirs, files in os.walk(d):
                 for f in files:
@@ -360,11 +376,14 @@ def edge_models():
                         pass
             out.append({
                 "id": name,
-                "note": kind,
+                "note": label,
+                "kind": kind,
                 "size": f"{size / 1e9:.2f} GB",
+                "size_gb": round(size / 1e9, 2),
                 "path": d,
-                "npu_compatible": is_llm,
-                "backend": "llama.cpp" if has_gguf else "openvino",
+                "devices": devices,
+                "npu_compatible": npu_ok,
+                "backend": "llama.cpp" if kind == "gguf" else "openvino",
             })
     return {"models": out}
 
@@ -416,18 +435,47 @@ def edge_download(repo: str, files: str = ""):
     return {"ok": True, "message": f"已开始后台下载 {repo}，完成后刷新模型列表。"}
 
 
-def _ensure_generator():
-    """Lazily load the pure-OpenVINO generator (NPU preferred, CPU fallback)."""
+def _ensure_generator(model_dir: Optional[str] = None):
+    """Lazily load the pure-OpenVINO VLM generator (device-aware)."""
     global _gen, _gen_device
-    if _gen is not None:
+    model_dir = model_dir or DEFAULT_MODEL_DIR
+    if _gen is not None and getattr(_gen, "model_dir", None) == model_dir:
         return _gen
     if not _GEN_AVAILABLE:
         raise HTTPException(503, "OpenVINO generator unavailable (missing openvino/tokenizers)")
-    if not os.path.isdir(DEFAULT_MODEL_DIR):
-        raise HTTPException(503, f"model dir not found: {DEFAULT_MODEL_DIR}")
-    _gen = PureOVGenerator(DEFAULT_MODEL_DIR, device=DEFAULT_DEVICE)
+    if not os.path.isdir(model_dir):
+        raise HTTPException(503, f"model dir not found: {model_dir}")
+    _gen = PureOVGenerator(model_dir, device=DEFAULT_DEVICE)
     _gen_device = _gen.device
     return _gen
+
+
+def _model_kind(d: str) -> str:
+    """Classify a model dir: 'gguf' | 'llm' (OpenVINO LLM IR) | 'vlm' | 'unknown'."""
+    if not os.path.isdir(d):
+        return "none"
+    if _find_gguf(d):
+        return "gguf"
+    if os.path.exists(os.path.join(d, "openvino_model.xml")):
+        return "llm"
+    if os.path.exists(os.path.join(d, "openvino_language_model.xml")):
+        return "vlm"
+    return "unknown"
+
+
+def _resolve_model_dir(model_id: Optional[str]) -> str:
+    """Resolve a request's model id to a local directory.
+
+    ``model_id`` is a folder name under models/ (as returned by /edge/models).
+    Falls back to the server default when absent or unknown.
+    """
+    if not model_id:
+        return DEFAULT_MODEL_DIR
+    # Accept either a bare folder name or an absolute path.
+    if os.path.isabs(model_id) and os.path.isdir(model_id):
+        return model_id
+    cand = os.path.join(_MODELS_DIR, model_id)
+    return cand if os.path.isdir(cand) else DEFAULT_MODEL_DIR
 
 
 def _find_gguf(model_dir: str) -> Optional[str]:
@@ -530,8 +578,11 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
             extra.append(f"\n\n[附件 {name}]\n{content[:6000]}")
         user = user + "".join(extra)
 
-    model_ok = os.path.isdir(DEFAULT_MODEL_DIR)
+    # Resolve the per-request model (falls back to the server default).
+    model_dir = _resolve_model_dir(req.model_id)
+    model_ok = os.path.isdir(model_dir)
     dev = req.device or DEFAULT_DEVICE
+    model_kind = _model_kind(model_dir) if model_ok else "none"
 
     def _degrade_text() -> str:
         prompt = "\n".join(f"{m.role}: {m.content}" for m in req.messages)
@@ -539,7 +590,7 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
         if not _GEN_AVAILABLE:
             reason.append("openvino/tokenizers not installed")
         if not model_ok:
-            reason.append(f"no model at {DEFAULT_MODEL_DIR}")
+            reason.append(f"no model at {model_dir}")
         return "[edge-infer degradation] " + "; ".join(reason) + " | echo: " + prompt
 
     # ---- streaming (SSE) ----
@@ -565,16 +616,30 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
                     obj["usage"] = usage
                 return sse(obj)
 
-            gguf = _find_gguf(DEFAULT_MODEL_DIR) if model_ok else None
+            gguf = _find_gguf(model_dir) if model_ok else None
             use_llama = _LLAMA_AVAILABLE and gguf is not None
-            use_genai = (not use_llama) and _GENAI_AVAILABLE and model_ok and is_llm_dir(DEFAULT_MODEL_DIR)
+            use_genai = (not use_llama) and _GENAI_AVAILABLE and model_ok and model_kind == "llm"
+            use_vlm_img = (not use_llama and not use_genai) and bool(req.images) and model_kind == "vlm" and _VLM_AVAILABLE
             try:
-                if use_llama:
+                if use_vlm_img:
+                    # VLM with images → VLMPipeline; emit the whole answer at once.
+                    global _vlm_img
+                    if _vlm_img is None or _vlm_img.model_dir != model_dir:
+                        _vlm_img = VlmImagePipeline(model_dir, device="GPU.0" if dev in ("auto", "AUTO", "GPU") else dev)
+                    r = _vlm_img.chat(user, req.images, system=system,
+                                      max_new_tokens=req.max_tokens, temperature=req.temperature)
+                    yield frame(r.text)
+                    yield frame("", finish="stop", usage={
+                        "prompt_tokens": r.prompt_tokens, "completion_tokens": r.completion_tokens,
+                        "total_tokens": r.prompt_tokens + r.completion_tokens,
+                        "est_tok_s": round(r.est_tok_s, 2), "device": r.device,
+                    })
+                elif use_llama:
                     yield from _llama_stream(frame, gguf, req, system, user)
                 elif use_genai:
                     _genai.load(
-                        DEFAULT_MODEL_DIR, device=dev,
-                        cache_dir=os.path.join(DEFAULT_MODEL_DIR, ".npu_cache", dev),
+                        model_dir, device=dev,
+                        cache_dir=os.path.join(model_dir, ".npu_cache", dev),
                     )
                     t0 = time.time()
                     nchars = 0
@@ -599,9 +664,9 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
                     })
                 else:
                     text = _degrade_text()
-                    if _GEN_AVAILABLE and model_ok:
+                    if _GEN_AVAILABLE and model_ok and model_kind == "vlm":
                         try:
-                            gen = _ensure_generator()
+                            gen = _ensure_generator(model_dir)
                             text = gen.chat(user, system=system, max_new_tokens=req.max_tokens,
                                             do_sample=req.temperature > 0.01,
                                             temperature=max(req.temperature, 0.01)).text
@@ -616,7 +681,21 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     # ---- non-streaming ----
-    gguf = _find_gguf(DEFAULT_MODEL_DIR) if model_ok else None
+    # VLM with images: use VLMPipeline (handles the image processor).
+    if req.images and model_kind == "vlm" and _VLM_AVAILABLE:
+        try:
+            global _vlm_img
+            if _vlm_img is None or _vlm_img.model_dir != model_dir:
+                _vlm_img = VlmImagePipeline(model_dir, device="GPU.0" if dev in ("auto", "AUTO", "GPU") else dev)
+            r = _vlm_img.chat(user, req.images, system=system,
+                              max_new_tokens=req.max_tokens, temperature=req.temperature)
+            return _resp(req.model, r.text, prompt_tokens=r.prompt_tokens,
+                         completion_tokens=r.completion_tokens, tok_s=r.est_tok_s,
+                         device=r.device)
+        except Exception as e:  # noqa: BLE001
+            print(f"[edge-infer] VLM image path failed: {e}")
+
+    gguf = _find_gguf(model_dir) if model_ok else None
     if _LLAMA_AVAILABLE and gguf is not None:
         try:
             t0 = time.time()
@@ -631,12 +710,12 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
         except Exception as e:  # noqa: BLE001
             print(f"[edge-infer] llama.cpp path failed, falling back: {e}")
 
-    if _GENAI_AVAILABLE and model_ok and is_llm_dir(DEFAULT_MODEL_DIR):
+    if _GENAI_AVAILABLE and model_ok and model_kind == "llm":
         try:
             _genai.load(
-                DEFAULT_MODEL_DIR,
+                model_dir,
                 device=dev,
-                cache_dir=os.path.join(DEFAULT_MODEL_DIR, ".npu_cache", dev),
+                cache_dir=os.path.join(model_dir, ".npu_cache", dev),
             )
             r = _genai.chat(
                 user, system=system,
@@ -651,12 +730,12 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
             print(f"[edge-infer] genai path failed, falling back: {e}")
 
     # VLM path (pure OpenVINO) / degradation.
-    if not _GEN_AVAILABLE or not model_ok or (gguf is not None and not is_llm_dir(DEFAULT_MODEL_DIR)):
+    if not _GEN_AVAILABLE or not model_ok or model_kind != "vlm":
         # Not a VLM-IR directory (e.g. GGUF-only) → don't try PureOVGenerator.
         return _resp(req.model, _degrade_text(), prompt_tokens=len(req.messages),
                      completion_tokens=-1, tok_s=0.0, degraded=True)
 
-    gen = _ensure_generator()
+    gen = _ensure_generator(model_dir)
     result = gen.chat(
         user,
         system=system,
@@ -873,19 +952,72 @@ def project_delete(name: str):
 
 class AttachmentReq(BaseModel):
     name: str
-    content: str
+    content: str = ""
+    data_b64: Optional[str] = None       # binary payload (images, folders, etc.)
+    rel_path: Optional[str] = None       # for folder uploads (keeps sub-paths)
 
 
 @app.post("/agent/upload")
 def agent_upload(req: AttachmentReq):
-    """Save an uploaded attachment into the workspace's uploads/ dir."""
+    """Save an uploaded attachment into the workspace's uploads/ dir.
+
+    Supports text (``content``) and binary (``data_b64``) payloads. Folder
+    uploads pass ``rel_path`` so the directory structure is preserved.
+    """
     if not _AGENT_AVAILABLE:
         raise HTTPException(503, "agent tools unavailable")
+    import base64 as _b64
+
     updir = _ws.root / "uploads"
     updir.mkdir(parents=True, exist_ok=True)
-    safe = os.path.basename(req.name) or "file.txt"
-    (updir / safe).write_text(req.content, encoding="utf-8")
-    return {"ok": True, "path": f"uploads/{safe}", "message": f"已保存附件 {safe}"}
+
+    # Preserve folder structure when rel_path is given; else flatten to basename.
+    rel = (req.rel_path or req.name).replace("\\", "/").lstrip("/")
+    rel = "/".join(seg for seg in rel.split("/") if seg not in ("", ".", ".."))
+    target = (updir / rel).resolve()
+    try:
+        target.relative_to(updir.resolve())
+    except ValueError:
+        raise HTTPException(400, "path escapes uploads dir")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if req.data_b64:
+        try:
+            target.write_bytes(_b64.b64decode(req.data_b64))
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"invalid base64 payload: {e}")
+    else:
+        target.write_text(req.content, encoding="utf-8")
+
+    return {"ok": True, "path": f"uploads/{rel}", "size": target.stat().st_size,
+            "message": f"已保存附件 {rel}"}
+
+
+@app.post("/edge/upload")
+def edge_upload(req: AttachmentReq):
+    """Upload an attachment to the shared uploads dir (works without agent mode)."""
+    import base64 as _b64
+
+    updir = os.path.join(_MODELS_DIR, "..", "uploads")
+    updir = os.path.abspath(updir)
+    os.makedirs(updir, exist_ok=True)
+    rel = (req.rel_path or req.name).replace("\\", "/").lstrip("/")
+    rel = "/".join(seg for seg in rel.split("/") if seg not in ("", ".", ".."))
+    target = os.path.abspath(os.path.join(updir, rel))
+    if not target.startswith(updir):
+        raise HTTPException(400, "path escapes uploads dir")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    if req.data_b64:
+        try:
+            with open(target, "wb") as f:
+                f.write(_b64.b64decode(req.data_b64))
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"invalid base64 payload: {e}")
+    else:
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(req.content)
+    return {"ok": True, "path": os.path.relpath(target, updir).replace("\\", "/"),
+            "size": os.path.getsize(target)}
 
 
 @app.post("/edge/device/set")
