@@ -380,6 +380,32 @@ def edge_problems(limit: int = 50):
     return {"ok": True, "problems": diag.read_problems(limit=max(1, min(limit, 500)))}
 
 
+@app.get("/edge/tier_plan")
+def edge_tier_plan(model: str = "", vram: float = 8.0, ram: float = 32.0):
+    """Plan 3-tier offloading for a GGUF model **without loading it**.
+
+    Reads only the GGUF header + tensor table, so it works on models far larger
+    than RAM. ``model`` may be a model-dir name under models/ or a direct path.
+    """
+    from . import diagnostics as diag
+    from . import tier_plan as tp
+
+    path = model
+    if path and not os.path.isfile(path):
+        cand = os.path.join(_MODELS_DIR, path)
+        if os.path.isdir(cand):
+            g = _find_gguf(cand)
+            if g:
+                path = g
+    if not path or not os.path.isfile(path):
+        raise HTTPException(400, f"未找到 GGUF 模型: {model or '(空)'}")
+    try:
+        return {"ok": True, "plan": tp.plan(path, vram, ram)}
+    except Exception as e:  # noqa: BLE001
+        diag.record_problem("tier_plan", str(e), context={"model": path}, exc=e)
+        raise HTTPException(500, f"规划失败: {e}")
+
+
 @app.post("/edge/problems/clear")
 def edge_problems_clear():
     """Truncate the problem log (after the user has exported it)."""

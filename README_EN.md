@@ -228,6 +228,61 @@ auto-matches the format, then downloads on click**.
 
 ---
 
+## 🧭 3-tier offload planner
+
+Before downloading a 60 GB+ model, know whether it will fit. `tier_plan.py`
+reads **only the GGUF header and tensor table** (never the weights), so it
+answers instantly even for models far larger than RAM:
+
+```bash
+cd python
+python -m edge_server.tier_plan <model.gguf> --vram 8 --ram 32
+```
+
+It reports per-group sizes (n-gram table / MoE experts / attention / other) and
+a per-group tier recommendation (VRAM / RAM / SSD), flagging when SSD must join.
+
+HTTP: `GET /edge/tier_plan?model=<dir-or-path>&vram=8&ram=32`
+
+---
+
+## 🚀 Very large MoE: Qwen3.8-Flash-Next (180B stored / 6B active)
+
+**A 66 GB model on 8 GB VRAM + 32 GB RAM, keeping 256K context.**
+
+Its architecture (`qwen4exp`) has three structural traits that fit 3-tier
+offloading unusually well:
+
+| Trait | Benefit |
+|---|---|
+| **48 layers = 36 GDN + 12 QSA**; only QSA layers keep a KV cache | **256K context needs just 2.67 GB** KV (f16) — 1/4 of a dense model its size |
+| **The n-gram table is a lookup, not a matmul** (16 rows per token) | Its 28.8 GB can live on **SSD**; `--lazy-mode auto` reads rows on demand |
+| **512 experts, only 10 active** (2%) | Expert weights tier by heat |
+
+Tier allocation:
+
+| Tier | Capacity | Holds |
+|---|---|---|
+| VRAM | 8 GB | attention + norm + output (~1.7 GB) + some experts |
+| RAM | 32 GB | the rest of the 37.57 GB backbone |
+| **SSD** | 1.1 TB | **the 28.8 GB n-gram table** (lazy, not resident) |
+
+```bash
+export LLAMA_ATTN_ROT_DISABLE=1     # required by qwen4exp
+
+llama-server -m .../Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
+  -ngl 999 -ncmoe 40 -c 32768 -ctk q8_0 -ctv q8_0 -fa on
+```
+
+> Key mechanism: this build's `--lazy-mode` defaults to `auto`, which reads
+> **any tensor larger than 4 GiB** on demand — the 28.8 GB n-gram table
+> qualifies, so it stays on disk out of the box.
+
+📖 Full plan (spec / memory budget / tuning / limits):
+[`docs/QWEN38_FLASH_NEXT.md`](docs/QWEN38_FLASH_NEXT.md)
+
+---
+
 ## 🏗 Architecture
 
 ```
@@ -481,6 +536,7 @@ edge-infer/
 │   ├── edge_server/
 │   │   ├── openai_server.py      FastAPI OpenAI-compatible service
 │   │   ├── diagnostics.py        env diagnostics + problem log + bundle export
+│   │   ├── tier_plan.py          GGUF 3-tier planner (header-only)
 │   │   ├── logging_setup.py      unified logging (rotating file + excepthooks)
 │   │   ├── llama_backend.py      llama.cpp backend (GGUF / CUDA 3-tier offload)
 │   │   ├── genai_backend.py      OpenVINO GenAI backend (LLMPipeline)
@@ -499,7 +555,8 @@ edge-infer/
 │   └── bench_ov.py               OpenVINO benchmark (prefill / decode split)
 ├── docs/
 │   ├── AMD.md                    AMD platform support roadmap
-│   └── TROUBLESHOOTING.md        troubleshooting guide
+│   ├── TROUBLESHOOTING.md        troubleshooting guide
+│   └── QWEN38_FLASH_NEXT.md     Qwen3.8-Flash-Next 3-tier offload plan
 ├── logs/                         runtime logs (diagnostics / problems.jsonl)
 ├── tauri-app/                    Tauri native shell
 ├── run_windows.bat               one-click launch

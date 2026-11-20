@@ -8,6 +8,23 @@
 ## [Unreleased]
 
 ### Added
+- **三层卸载规划工具** `edge_server/tier_plan.py`：**只读 GGUF 头与张量表**
+  （不加载权重），对任意大小模型秒出结论 —— 分组体积（n-gram 表 / MoE 专家 /
+  注意力 / 其它）+ 逐组分层建议（VRAM / RAM / SSD）+ 是否需 SSD 参与。
+  自带的 GGUF 解析器零依赖（仅 `struct`），能安全跳过超大字符串数组。
+  CLI：`python -m edge_server.tier_plan <model.gguf> --vram 8 --ram 32`；
+  HTTP：`GET /edge/tier_plan?model=<dir>&vram=8&ram=32`。
+- **Qwen3.8-Flash-Next（`qwen4exp`）支持方案** `docs/QWEN38_FLASH_NEXT.md`：
+  从 GGUF 元数据核实规格（48 层 = 36 GDN + 12 QSA / 512 专家 top-10 /
+  256K 原生上下文）、三层内存预算、启动配置、已知限制。
+  - 关键结论：**只有 12 个 QSA 层有 KV cache** → 256K 上下文仅需 2.67 GB（f16），
+    是同规模 dense 的 1/4；
+  - n-gram 表（28.8 GB）是**查表非矩阵乘**，本机 llama.cpp 的 `--lazy-mode`
+    默认 `auto`（>4 GiB 张量按需读）正好命中 → 表留在 SSD，不占常驻内存。
+- README 中英双版新增「三层卸载规划工具」「超大 MoE：Qwen3.8-Flash-Next」章节；
+  目录结构同步。
+
+### Added（上一批）
 - **环境诊断模块** `edge_server/diagnostics.py`：10 类探针（OS / CPU / 内存 /
   NVIDIA / OpenVINO / 厂商 NPU / 后端 import / llama.cpp 设备 / SSD / 模型目录）
   并发执行、逐项隔离，输出结构化 JSON + 可读摘要，并给出**能力评估**

@@ -200,6 +200,59 @@ decode = 稳态生成。
 
 ---
 
+## 🧭 三层卸载规划工具
+
+在下载 60 GB+ 的模型之前，先算清楚它能不能放下 —— `tier_plan.py` **只读 GGUF 头
+与张量表**（不加载权重），对任意大小的模型都能秒出结论：
+
+```bash
+cd python
+python -m edge_server.tier_plan <model.gguf> --vram 8 --ram 32
+```
+
+输出会给出**分组体积**（n-gram 表 / MoE 专家 / 注意力 / 其它）与
+**逐组分层建议**（VRAM / RAM / SSD），并提示是否需要 SSD 参与。
+
+HTTP：`GET /edge/tier_plan?model=<模型目录或路径>&vram=8&ram=32`
+
+---
+
+## 🚀 超大 MoE：Qwen3.8-Flash-Next（180B 存储 / 6B 激活）
+
+**在 8 GB 显存 + 32 GB 内存上跑 66 GB 模型，并保持 256K 上下文。**
+
+该模型（`qwen4exp` 架构）有三个结构特性，天然契合三层卸载：
+
+| 特性 | 收益 |
+|---|---|
+| **48 层 = 36 GDN + 12 QSA**，只有 QSA 层有 KV cache | **256K 上下文仅需 2.67 GB** KV（f16），是同规模 dense 的 1/4 |
+| **n-gram 表是查表不是矩阵乘**（每 token 只读 16 行） | 28.8 GB 的表可放 **SSD**，`--lazy-mode auto` 自动按需读 |
+| **512 专家只激活 10 个**（2%） | 专家权重可按热度分层 |
+
+三层分配：
+
+| 层 | 容量 | 放什么 |
+|---|---|---|
+| VRAM | 8 GB | 注意力 + norm + 输出（~1.7 GB）+ 部分专家 |
+| RAM | 32 GB | 主干 37.57 GB 的剩余部分 |
+| **SSD** | 1.1 TB | **n-gram 表 28.8 GB**（lazy 按需读，不占常驻内存） |
+
+```bash
+export LLAMA_ATTN_ROT_DISABLE=1     # qwen4exp 需要
+
+llama-server -m .../Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
+  -ngl 999 -ncmoe 40 -c 32768 -ctk q8_0 -ctv q8_0 -fa on
+```
+
+> 关键机制：本机 llama.cpp 的 `--lazy-mode` 默认 `auto`，
+> **对 >4 GiB 的张量自动按需读取** —— n-gram 表 28.8 GB 正好命中，
+> 开箱即用就会留在磁盘上。
+
+📖 完整方案（规格 / 内存预算 / 调优 / 已知限制）见
+[`docs/QWEN38_FLASH_NEXT.md`](docs/QWEN38_FLASH_NEXT.md)
+
+---
+
 ## 🏗 架构
 
 ```
@@ -446,6 +499,7 @@ edge-infer/
 │   ├── edge_server/
 │   │   ├── openai_server.py      FastAPI OpenAI 兼容服务
 │   │   ├── diagnostics.py        环境诊断 + 问题记录 + 诊断包导出
+│   │   ├── tier_plan.py          三层卸载规划（只读 GGUF 头，不加载权重）
 │   │   ├── logging_setup.py      统一日志（滚动文件 + 异常捕获）
 │   │   ├── llama_backend.py      llama.cpp 后端（GGUF / CUDA 三层卸载）
 │   │   ├── genai_backend.py      OpenVINO GenAI 后端（LLMPipeline）
@@ -464,7 +518,8 @@ edge-infer/
 │   └── bench_ov.py               OpenVINO 基准（拆分 prefill / decode）
 ├── docs/
 │   ├── AMD.md                    AMD 平台支持规划（GPU / NPU 路线图）
-│   └── TROUBLESHOOTING.md        疑难排查指南
+│   ├── TROUBLESHOOTING.md        疑难排查指南
+│   └── QWEN38_FLASH_NEXT.md      Qwen3.8-Flash-Next 三层卸载方案
 ├── logs/                         运行日志（诊断包 / problems.jsonl）
 ├── tauri-app/                    Tauri 原生壳
 ├── run_windows.bat               一键启动
