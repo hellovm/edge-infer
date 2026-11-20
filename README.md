@@ -2,15 +2,17 @@
 
 **端侧三层卸载多硬件推理平台 · 本地 AI 工作台**
 
+[![Version](https://img.shields.io/badge/version-0.2.1-2ea44f.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![OpenVINO](https://img.shields.io/badge/OpenVINO-2026.4-0091D5.svg)](https://docs.openvino.ai/)
+[![llama.cpp](https://img.shields.io/badge/llama.cpp-CUDA%20%7C%20CPU-6E6E6E.svg)](https://github.com/ggml-org/llama.cpp)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011-0078D6.svg)](#快速开始)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-24C8DB.svg)](https://tauri.app/)
 
 在 Windows 上运行本地大模型：**Rust 自研三层卸载内核**（SSD / 内存 / 显存）+
-**OpenVINO 推理服务**（NVIDIA GPU / Intel NPU / CPU）+ **本地
-Agent 工作台**（可真正操作文件系统、创建项目文件夹、执行命令）。
+**双推理后端**（NVIDIA → llama.cpp CUDA；Intel GPU / NPU → OpenVINO）+
+**本地 Agent 工作台**（可真正操作文件系统、创建项目文件夹、执行命令）。
 
 > 目标：让原本跑不动大模型的 Windows 笔记本也能跑起来，并支持更长的上下文。
 > 从内核到调度全部独立自主实现。
@@ -35,6 +37,11 @@ Agent 工作台**（可真正操作文件系统、创建项目文件夹、执行
   关键结论：**OpenVINO 的 GPU 插件面向 Intel 优化，把 N 卡交给它等于浪费 20 倍性能**。
   因此 N 卡一律走 llama.cpp CUDA，Intel GPU / NPU 走 OpenVINO。
 
+- **同一模型按设备自动匹配格式** — 模型目录按「模型 → 变体」组织：同一个模型名下
+  挂 `nvidia` / `intel-gpu` / `npu` 多套变体，选中硬件后自动取对应格式
+  （N 卡 → **GGUF**，Intel GPU / NPU → **OpenVINO IR**），用户无需关心底层格式；
+  选错组合会明确提示，不会静默走慢路径。
+
 - **纯 OpenVINO 推理链路** — 不依赖 torch / transformers，只用 `openvino` +
   `tokenizers` + `numpy`，绕开版本地狱（VLM 路径）。
 - **OpenVINO GenAI 后端** — `LLMPipeline` 驱动 NPU / Intel GPU / CPU，支持 **SSE 流式输出**。
@@ -46,11 +53,15 @@ Agent 工作台**（可真正操作文件系统、创建项目文件夹、执行
   Ada 卡的正确选择是 **FP8**（需 vLLM/TensorRT-LLM）或 **GGUF Q4_K_M / Q5_K_M**。
 - **本地 Agent** — 模型可自主调用工具：创建任务文件夹、
   读写文件、搜索、执行命令；全部限制在沙箱工作区内。
+- **联网搜索** — 内置 Playwright 驱动本机 Edge 抓取搜索结果并注入上下文，
+  可与本地模型组合使用（开关式）。
 - **OpenAI 兼容 API** — 对外暴露 `/v1/chat/completions`（含 `stream=true`），
   可被任意客户端调用；支持 API Key 鉴权。
 - **工作台 GUI** — 对话 / Agent 工作区 / 三层方案 / 模型 / 设置
-  五个视图；会话列表持久化；可切换本地引擎 or 外接 OpenAI API。
-- **Tauri 原生窗口** — 6.7MB 原生 exe，非浏览器外壳。
+  五个视图；顶部设备 chip 可点击切换；输入区支持模型选择、文件 / 图片 /
+  文件夹上传与联网搜索开关；会话列表持久化，可切换本地引擎 or 外接 OpenAI API。
+- **一键启动** — Tauri 原生窗口（6.7MB exe，非浏览器外壳）启动时自动拉起
+  Python 推理服务，关闭时自动回收，不留残留进程。
 
 ---
 
@@ -92,23 +103,26 @@ Unsupported DynamicDequantizeOp configuration:
 本项目的价值在于**让原本跑不动的大模型跑起来**，所以推荐的都是 **MoE 混合专家**模型 ——
 它们的单 token 工作集只是*激活参数*（如 35B-A3B 只激活 3B），这正是三层卸载能获益的关键。
 
-工作台「菜单 → 模型」页展示同一份清单，**点击卡片即自动下载**。
+工作台「菜单 → 模型」页展示同一份清单，**选中设备后自动匹配对应格式并点击下载**。
 
-| 硬件 | 模型 | 后端 | 分层 |
-|---|---|---|---|
-| **NVIDIA GPU** | Qwen3.6-35B-A3B（21.2 GB） | llama.cpp CUDA | SSD + 内存 + 显存 |
-| **NVIDIA GPU** | Qwen3-Next-80B-A3B（48.5 GB） | llama.cpp CUDA | SSD + 内存 + 显存 |
-| **Intel GPU** | Qwen3-30B-A3B（16.3 GB） | OpenVINO | SSD + 内存 + 共享显存 |
-| **Intel GPU** | Qwen3.6-35B-A3B（19.4 GB） | OpenVINO | SSD + 内存 + 共享显存 |
-| **Intel NPU** | Qwen3-8B（4.8 GB） | OpenVINO | SSD + 内存（无独立显存层） |
-| **Intel NPU** | MiniCPM-V-4.5 9B（5.3 GB） | OpenVINO | SSD + 内存（无独立显存层） |
+| 模型 | 参数 | 后端 · 格式 | 体积 | 分层 |
+|---|---|---|---|---|
+| **Qwen3.6-35B-A3B** | 35B-A3B · 多模态 | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 21.2 / 19.4 GB | SSD + 内存 + 显存 |
+| **Qwen3-30B-A3B** | 30B-A3B | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 18.6 / 16.3 GB | SSD + 内存 + 显存 |
+| **Qwen3-Next-80B-A3B** | 80B-A3B | llama.cpp CUDA · GGUF | 48.5 GB | SSD + 内存 + 显存 |
+| **Qwen3-8B** | 8B | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 5.0 / 4.75 GB | SSD + 内存（+ 显存） |
+| **MiniCPM-V-4.5** | 9B · 多模态 | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 6.0 / 5.26 GB | SSD + 内存（+ 显存） |
 
 - **N 卡**：一律走 **llama.cpp CUDA**（实测 126.7 tok/s；交给 OpenVINO 只有 6.1）。
   从 35B-A3B 到 80B-A3B —— 8 GB 显存也能跑，靠三层卸载。
 - **i 卡**：走 **OpenVINO**（Arc 上比 Vulkan 快约 1.8×），30B / 35B MoE 均可卸载。
 - **NPU**：本身就用系统内存（无独立显存层），因此走 **SSD + 内存两层分片**；
-  已实测 9B 多模态（MiniCPM-V-4.5），30B 级 MoE 验证进行中。
+  已实测 9B 多模态（MiniCPM-V-4.5，对称 INT4），30B 级 MoE 验证进行中。
 
+> **同一模型按设备自动切换格式**：上表里同一模型名在 N 卡下取 GGUF、在 i 卡 / NPU 下取
+> OpenVINO IR —— 由 `model_catalog.py` 的「模型 → 变体」结构 + `resolve_device()`
+> 自动完成，用户无需手动选格式。
+>
 > 说明：`llama.cpp` 后端的 GGUF 模型用 `--n-cpu-moe N` 把 MoE 层放到 CPU/内存、
 > 其余留在显存，是天然的三层卸载路径；OpenVINO IR 模型则由本项目 Rust 内核规划分层。
 
@@ -129,17 +143,20 @@ Unsupported DynamicDequantizeOp configuration:
 │  /agent/chat            本地 Agent 工具循环                  │
 │  /edge/devices          真实硬件探测（含 SSD 带宽）           │
 │  /edge/run_plan         调 Rust 内核计算三层方案              │
-│  /edge/models,/download 模型管理                            │
-└───────┬──────────────────────────────┬─────────────────────┘
-        │                              │
-        ▼                              ▼
-┌──────────────────┐        ┌──────────────────────────────┐
-│ genai_backend.py │        │ pure_ov_gen.py               │
-│ LLMPipeline      │        │ 纯 OpenVINO 手写 VLM 推理      │
-│ NPU/GPU/CPU      │        │ （无 torch/transformers）      │
-└──────────────────┘        └──────────────────────────────┘
-        │
-        ▼
+│  /edge/catalog          按设备匹配模型变体（GGUF / IR）       │
+│  /edge/download(s)      模型下载与状态                       │
+└───┬──────────────┬───────────────┬─────────────────────────┘
+    │              │               │
+    ▼              ▼               ▼
+┌────────────┐ ┌──────────────┐ ┌────────────────────────────┐
+│ llama_     │ │ genai_       │ │ pure_ov_gen.py             │
+│ backend.py │ │ backend.py   │ │ 纯 OpenVINO 手写 VLM 推理    │
+│ GGUF →     │ │ LLMPipeline  │ │ （无 torch/transformers）    │
+│ llama.cpp  │ │ NPU/GPU/CPU  │ │                            │
+│ (CUDA)     │ │              │ │                            │
+└────────────┘ └──────────────┘ └────────────────────────────┘
+    │
+    ▼
 ┌────────────────────────────────────────────────────────────┐
 │  Rust 内核  crates/                                         │
 │  edge-detect    硬件探测（GPU/NPU/CPU/SSD）                  │
@@ -289,8 +306,11 @@ edge-infer/
 ├── python/
 │   ├── edge_server/
 │   │   ├── openai_server.py      FastAPI OpenAI 兼容服务
-│   │   ├── genai_backend.py      NPU/LLM 后端（LLMPipeline）
+│   │   ├── llama_backend.py      llama.cpp 后端（GGUF / CUDA 三层卸载）
+│   │   ├── genai_backend.py      OpenVINO GenAI 后端（LLMPipeline）
 │   │   ├── pure_ov_gen.py        纯 OpenVINO VLM 推理
+│   │   ├── model_catalog.py      按设备匹配的模型目录（模型 → 变体）
+│   │   ├── web_search.py         联网搜索（Playwright + 本机 Edge）
 │   │   ├── agent_tools.py        本地 Agent 工具 + 沙箱
 │   │   ├── storage_probe.py      SSD 型号 + 带宽探测
 │   │   ├── download_modelscope.py ModelScope 下载

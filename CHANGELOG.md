@@ -7,7 +7,12 @@
 
 ## [Unreleased]
 
-v0.2.0 之后的增量（版本号待正式发布时再定）。
+（暂无）
+
+## [0.2.1] - 2026-11-20
+
+本次版本聚焦 **「同一模型按设备自动切换格式」** + **双推理路线** +
+**UI 全面重构为可交付工作台**，并修复了一批下载状态与思考输出的问题。
 
 ### Added
 - **一键启动**：Tauri 原生窗口启动时自动定位项目根目录与 Python 解释器，
@@ -18,11 +23,14 @@ v0.2.0 之后的增量（版本号待正式发布时再定）。
 - 新增 Tauri 命令 `start_service` / `service_status`（供前端手动重试）。
 - GUI 启动状态提示：「正在启动推理服务…」→ 就绪 / 失败可点击重试。
 - **模型推荐目录**（`model_catalog.py`）：NVIDIA / Intel GPU / Intel NPU 各
-  2 个模型（一大一小），**以超大 MoE 为主**（利用三层卸载的优势），
-  标注参数量、激活参数、量化方式、体积、内存建议与分层方式；新增
-  `/edge/catalog` 端点（含已安装标记），点击卡片直接下载。
-  支持 GGUF 仓库按文件白名单下载（避免误拉多个量化版本，80B 仓库全量 >3 TB）。
-  另新增 `/edge/downloads` 查看下载状态。
+  2 个模型，**以超大 MoE 为主**（利用三层卸载的优势），标注参数量、激活参数、
+  量化方式、体积、内存建议与分层方式；新增 `/edge/catalog` 端点（含已安装标记），
+  点击卡片直接下载。支持 GGUF 仓库按文件白名单下载（避免误拉多个量化版本，
+  80B 仓库全量 >3 TB）。另新增 `/edge/downloads` 查看下载状态。
+- **同一模型按设备自动匹配格式**（`model_catalog.py` 重构为「按模型组织 + variants」）：
+  同一个模型名下挂 `nvidia` / `intel-gpu` / `npu` 多套变体，`resolve_device()`
+  按当前硬件自动选出对应格式 —— N 卡取 **GGUF**，Intel GPU / NPU 取 **OpenVINO IR**，
+  用户无需关心底层格式。
 - **llama.cpp 后端**（`llama_backend.py`）：支持 GGUF 模型，覆盖 OpenVINO IR
   无法承载的更大 MoE（80B-A3B 及以上）。以子进程方式管理 `llama-server`，
   通过 `--n-cpu-moe` 把 MoE 层放到 CPU/内存实现三层卸载；`/v1/chat/completions`
@@ -32,33 +40,38 @@ v0.2.0 之后的增量（版本号待正式发布时再定）。
   而 **NVIDIA 经 OpenVINO 只有 6.1 tok/s（慢约 20×）**。
   因此 NVIDIA → llama.cpp CUDA，Intel GPU / NPU → OpenVINO；
   选 N 卡却用 IR 模型时会明确提示改用 GGUF，不再静默走慢路径。
-- **模型选择**：输入区新增模型下拉，按当前设备过滤；后端 `_resolve_model_dir`
-  支持按请求切换模型。
+- **顶部设备 chip 可点击切换**：NVIDIA GPU / Intel NPU / CPU / AUTO 实时生效。
+- **模型选择器**：输入区下拉，按当前设备过滤可用模型；「模型」页展示**支持的
+  模型清单 + 下载状态**（✓ 已下载 / ⏳ 下载中 / 下载），点击卡片自助下载。
+- **联网搜索**（`web_search.py`）：Playwright 驱动本机 Edge 抓取搜索结果，
+  在对话上下文中注入，可与本地模型组合使用（开关式）。
+- **输入区重构**：模型选择 + 文件 / 图片 / 文件夹上传 + 联网搜索开关，
+  全部收敛到 composer 卡片。
+- 对话区显示 **token 数 / tok·s⁻¹ / 推理设备**。
+- 历史对话**归档 / 取消归档 / 删除**（可连带删除关联项目文件夹）。
+- 「关于」页开发者信息。
 
 ### Changed
 - 推荐模型目录：N 卡组改为 **GGUF（llama.cpp CUDA）**；卡片去掉「大/小」标注，
   只保留模型名称、介绍与推荐硬件规格。
-
-### Notes
-- **量化说明**：FP4/NVFP4 需 Blackwell（RTX 50 系，sm120）的 FP4 张量核；
-  RTX 40 系（Ada，sm89）**无 FP4 通路**，NVFP4 退化为软件模拟可能更慢。
-  Ada 卡宜用 FP8（vLLM/TensorRT-LLM）或 GGUF Q4_K_M/Q5_K_M。
-- **运行时设备切换**：`/edge/device/set`、`/edge/device/current`，
-  NVIDIA GPU / Intel NPU / CPU / AUTO 真正生效。
-- **思考模式开关**：关闭时过滤 `think` 块，开启时以折叠框展示思考过程。
-- 对话区显示 **token 数 / tok-s / 推理设备**。
-- 历史对话**归档 / 取消归档 / 删除**（可连带删除关联项目文件夹）。
-- 输入框**附件上传**（文本内容随请求注入，`/agent/upload`）。
-- 「关于」页开发者信息。
-- 实测：NPU 可跑 9B 多模态（MiniCPM-V-4.5 `int4-cw`，对称量化 + `VLMPipeline`），
-  首次加载含编译约 50s。
-
-### Changed
+- 模型选择器徽章改显示 **设备**（NVIDIA GPU / Intel NPU…），不再显示后端名。
 - 布局重构：右侧专注对话，项目 / Agent / 三层方案 / 模型 / 设置收入左下角菜单弹层。
+- 生成提示词改用**模型自身的 chat 模板**（`tokenizer.apply_chat_template`），
+  不再写死 Qwen 模板。
 - `run_windows.bat` 简化为「优先启动原生窗口」；无原生窗口时回退「服务 + 浏览器」。
 - 文档移除第三方产品名，统一为「本地 Agent」表述。
 
 ### Fixed
+- **思考内容泄漏**：llama.cpp 路径下 Qwen3 的推理过程被当作正文输出，回答里出现
+  `im_start` / `im_end` 等特殊标记 → 给 `llama-server` 加
+  `--reasoning off --reasoning-format deepseek`，思考块不再混入正文。
+- **思考模板误用**：`genai_backend.py` 原写死 Qwen `<|im_start|>` 模板，导致
+  DeepSeek 等模型把模板标记当纯文本讨论 → 改用模型自带 chat 模板。
+- **模型下载状态误判**：80B 模型只有 `.incomplete` 临时文件却被当成「已安装」
+  → 新增 `_dir_state()` 三态（`ready` / `downloading` / `empty`），`*.incomplete`
+  识别为下载中；`/edge/models` 增加 `state` / `usable` 字段，前端区分展示。
+- **模型选择器永久为空**：`loadModelsForPicker` 只在 init 时调用一次，之后
+  后台新下载的模型不出现 → 改为每次打开菜单都重新拉取。
 - **Tauri 前端误判服务离线**（核心 bug）：页面源 `http://tauri.localhost` 的
   asset server 对未知路径（如 `/health`）会 fallback 返回 `index.html`
   （HTTP 200 + HTML）。此前只检查 `r.ok`，误把它当作有效 API，导致后续请求
@@ -68,8 +81,19 @@ v0.2.0 之后的增量（版本号待正式发布时再定）。
 - **删除对话后界面残留**：空态原本用 `$("chatEmpty").outerHTML` 获取，但该元素
   首次渲染即被 `innerHTML` 覆盖销毁导致取不到；改为函数生成空态，
   删除当前对话后自动切到最近对话，无对话则新建空对话并清空输入框。
-- 流式结束后「Agent 运行中」状态残留；SSE 末帧补齐 usage（token / tok-s / 设备）。
+- **联网搜索返回 0 条**：自定义 `User-Agent` 导致 Bing 返回不同页面结构
+  → 改用浏览器默认 UA。
+- 流式结束后「Agent 运行中」状态残留；SSE 末帧补齐 usage（token / tok·s⁻¹ / 设备）。
 - 模型列表 NPU 兼容性判断错误（LLM IR 用 `openvino_model.xml`）。
+- 路由误判：原按**激活参数**判定大小模型，导致 35B-A3B（激活 3B）被错判为小模型
+  → 改为按**总参数量**判定。
+
+### Notes
+- **量化说明**：FP4/NVFP4 需 Blackwell（RTX 50 系，sm120）的 FP4 张量核；
+  RTX 40 系（Ada，sm89）**无 FP4 通路**，NVFP4 退化为软件模拟可能更慢。
+  Ada 卡宜用 FP8（vLLM/TensorRT-LLM）或 GGUF Q4_K_M/Q5_K_M。
+- 实测：NPU 可跑 9B 多模态（MiniCPM-V-4.5 `int4-cw`，对称量化 + `VLMPipeline`），
+  首次加载含编译约 50s；NPU 实测约 **18.98 tok/s**。
 
 ## [0.2.0] - 2026-11-20
 
@@ -137,6 +161,7 @@ v0.2.0 之后的增量（版本号待正式发布时再定）。
 - Tauri windows-gnu 工具链 `dlltool` 缺失 → 改用完整 MinGW-w64
 - Tauri v2 命令宏命名冲突 → 命令移入 `commands.rs` 子模块
 
-[Unreleased]: https://github.com/hellovm/-edge-infer/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/hellovm/-edge-infer/releases/tag/v0.2.0
-[0.1.0]: https://github.com/hellovm/-edge-infer/releases/tag/v0.1.0
+[Unreleased]: https://github.com/hellovm/edge-infer/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/hellovm/edge-infer/releases/tag/v0.2.1
+[0.2.0]: https://github.com/hellovm/edge-infer/releases/tag/v0.2.0
+[0.1.0]: https://github.com/hellovm/edge-infer/releases/tag/v0.1.0
