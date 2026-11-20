@@ -35,3 +35,6 @@ desktop.ini
 .idea/
 .vscode/
 *.swp
+
+# ---- Runtime logs (diagnostics bundles, problem records) ----
+logs/

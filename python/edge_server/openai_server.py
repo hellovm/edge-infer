@@ -342,6 +342,58 @@ def health():
     }
 
 
+# ---------------------------------------------------------------------------
+# diagnostics -- environment snapshot + problem log (see diagnostics.py)
+# ---------------------------------------------------------------------------
+@app.get("/edge/diagnostics")
+def edge_diagnostics(fast: int = 1, problems: int = 20):
+    """Structured environment report + recent recorded problems.
+
+    ``fast=0`` additionally runs the slow probes (llama-bench device listing,
+    SSD bandwidth benchmark).
+    """
+    from . import diagnostics as diag
+
+    report = diag.collect_report(tag="api", fast=bool(fast))
+    return {"ok": True, "report": report,
+            "problems": diag.read_problems(limit=max(0, min(problems, 200)))}
+
+
+@app.post("/edge/diagnostics/bundle")
+def edge_diagnostics_bundle(tag: str = ""):
+    """Write a zip (report + logs) and return its path for the GUI to offer."""
+    from . import diagnostics as diag
+
+    try:
+        path = diag.build_bundle(tag=tag)
+        return {"ok": True, "path": path, "name": os.path.basename(path)}
+    except Exception as e:  # noqa: BLE001
+        diag.record_problem("diagnostics_bundle", str(e), exc=e)
+        raise HTTPException(500, f"诊断包生成失败: {e}")
+
+
+@app.get("/edge/problems")
+def edge_problems(limit: int = 50):
+    """Recent recorded problems (newest last)."""
+    from . import diagnostics as diag
+
+    return {"ok": True, "problems": diag.read_problems(limit=max(1, min(limit, 500)))}
+
+
+@app.post("/edge/problems/clear")
+def edge_problems_clear():
+    """Truncate the problem log (after the user has exported it)."""
+    from . import diagnostics as diag
+
+    try:
+        if os.path.isfile(diag.PROBLEM_LOG):
+            open(diag.PROBLEM_LOG, "w", encoding="utf-8").close()
+        return {"ok": True}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, str(e))
+
+
+
 @app.get("/edge/devices")
 def edge_devices():
     """Real hardware discovery (OpenVINO devices + the three-tier report)."""
@@ -912,10 +964,20 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
         prompt = "\n".join(f"{m.role}: {m.content}" for m in req.messages)
         reason = []
         if not _GEN_AVAILABLE:
-            reason.append("openvino/tokenizers not installed")
+            reason.append("openvino/tokenizers 未安装")
         if not model_ok:
-            reason.append(f"no model at {model_dir}")
-        return "[edge-infer degradation] " + "; ".join(reason) + " | echo: " + prompt
+            reason.append(f"模型目录不存在: {model_dir}")
+        elif model_kind == "gguf" and not _LLAMA_AVAILABLE:
+            reason.append("模型是 GGUF 但未找到 llama-server（设置 EDGE_LLAMA_DIR）")
+        elif model_kind == "llm" and not _GENAI_AVAILABLE:
+            reason.append("模型是 OpenVINO IR 但 openvino_genai 不可用")
+        if dev == "NPU" and not _NPU_AVAILABLE:
+            reason.append("请求了 NPU 但本机没有 Intel NPU（OpenVINO 的 NPU 插件为 Intel 专属）")
+        if not reason:
+            reason.append(f"无可用推理路径（模型类型 '{model_kind}'）")
+        return ("[edge-infer 降级响应] " + "；".join(reason)
+                + "\n运行 `python -m edge_server.diagnostics` 查看完整环境报告。"
+                + "\n| echo: " + prompt)
 
     # ---- streaming (SSE) ----
     if req.stream:
@@ -1000,11 +1062,33 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
                             text = gen.chat(user, system=system, max_new_tokens=req.max_tokens,
                                             do_sample=req.temperature > 0.01,
                                             temperature=max(req.temperature, 0.01)).text
-                        except Exception:  # noqa: BLE001
-                            pass
+                        except Exception as e:  # noqa: BLE001
+                            from . import diagnostics as _diag
+                            _diag.record_problem(
+                                "backend_pure_ov_fallback", str(e),
+                                context={"model_dir": model_dir, "device": dev}, exc=e)
+                    else:
+                        from . import diagnostics as _diag
+                        _diag.record_problem(
+                            "degraded_response", text.split("\n")[0][:300],
+                            context={"model_dir": model_dir, "model_kind": model_kind,
+                                     "device": dev, "ov_device": ov_dev,
+                                     "llama_available": _LLAMA_AVAILABLE,
+                                     "genai_available": _GENAI_AVAILABLE,
+                                     "npu_available": _NPU_AVAILABLE})
                     yield frame(text)
                     yield frame("", finish="stop")
             except Exception as e:  # noqa: BLE001
+                from . import diagnostics as _diag
+                _diag.record_problem(
+                    "inference_stream",
+                    str(e),
+                    context={"model_dir": model_dir, "kind": model_kind,
+                             "device": dev, "ov_device": ov_dev,
+                             "use_llama": use_llama, "use_genai": use_genai,
+                             "use_vlm_img": use_vlm_img},
+                    exc=e,
+                )
                 yield sse({"error": str(e)})
             yield "data: [DONE]\n\n"
 
@@ -1023,6 +1107,9 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
                          completion_tokens=r.completion_tokens, tok_s=r.est_tok_s,
                          device=r.device)
         except Exception as e:  # noqa: BLE001
+            from . import diagnostics as _diag
+            _diag.record_problem("vlm_image", str(e),
+                                 context={"model_dir": model_dir, "device": ov_dev}, exc=e)
             print(f"[edge-infer] VLM image path failed: {e}")
 
     gguf = _find_gguf(model_dir) if model_ok else None
@@ -1038,6 +1125,9 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
             return _resp(req.model, text, prompt_tokens=max(len(user) // 2, 1),
                          completion_tokens=comp, tok_s=comp / dt, device="llama.cpp")
         except Exception as e:  # noqa: BLE001
+            from . import diagnostics as _diag
+            _diag.record_problem("backend_llama_fallback", str(e),
+                                 context={"model_dir": model_dir, "gguf": gguf, "device": dev}, exc=e)
             print(f"[edge-infer] llama.cpp path failed, falling back: {e}")
 
     if _GENAI_AVAILABLE and model_ok and model_kind == "llm":
@@ -1057,11 +1147,34 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
                          completion_tokens=r.completion_tokens, tok_s=r.est_tok_s,
                          device=r.device)
         except Exception as e:  # noqa: BLE001
+            from . import diagnostics as _diag
+            _diag.record_problem("backend_genai_fallback", str(e),
+                                 context={"model_dir": model_dir, "device": dev,
+                                          "ov_device": ov_dev}, exc=e)
             print(f"[edge-infer] genai path failed, falling back: {e}")
 
     # VLM path (pure OpenVINO) / degradation.
     if not _GEN_AVAILABLE or not model_ok or model_kind != "vlm":
         # Not a VLM-IR directory (e.g. GGUF-only) → don't try PureOVGenerator.
+        # A degradation is exactly the kind of thing users report as "it's
+        # broken but I can't say why", so record it (with the reason) here.
+        from . import diagnostics as _diag
+        reasons = []
+        if not _GEN_AVAILABLE:
+            reasons.append("openvino/tokenizers 未安装")
+        if not model_ok:
+            reasons.append(f"模型目录不存在: {model_dir}")
+        if model_kind != "vlm":
+            reasons.append(f"模型类型为 '{model_kind}'（非 VLM IR），"
+                           f"且无可用 GGUF / GenAI 路径")
+        _diag.record_problem(
+            "degraded_response",
+            "；".join(reasons) or "unknown",
+            context={"model_dir": model_dir, "model_kind": model_kind,
+                     "device": dev, "ov_device": ov_dev,
+                     "llama_available": _LLAMA_AVAILABLE,
+                     "genai_available": _GENAI_AVAILABLE},
+        )
         return _resp(req.model, _degrade_text(), prompt_tokens=len(req.messages),
                      completion_tokens=-1, tok_s=0.0, degraded=True)
 

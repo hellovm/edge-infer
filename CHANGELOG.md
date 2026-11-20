@@ -7,42 +7,52 @@
 
 ## [Unreleased]
 
-### Changed
-- README 特性表精简：移除 CPU 两行与「NVIDIA via OpenVINO (GPU.1)」行
-  （转为表下脚注），NPU 行标注具体平台 **AI Boost · Core Ultra 7 155H**；
-  中英双版同步。
-- 设备别名归一化（`_norm_dev`）：`NVIDIA GPU` / `nvidia_gpu` / `NVIDIA-GPU`
-  等等价写法统一路由，避免文档里的自然写法落空。
-
-### Fixed
-- **NPU 可用性校验**：此前显式请求 `NPU` 时不检查硬件是否存在。
-  现在新增 `_NPU_AVAILABLE`（由 OpenVINO `available_devices` 探测），
-  无 NPU 的机器（含 **AMD XDNA / Ryzen AI**，OpenVINO 不枚举该设备）
-  自动回退 CPU；模型列表的设备徽章与 `/edge/devices` 也据此修正，
-  不再谎报"支持 NPU"。
-
 ### Added
-- **`scripts/bench_llama.py` / `scripts/bench_ov.py`**：性能基准脚本，
-  分别封装 `llama-bench`（含 `--n-cpu-moe` 三层卸载）与 OpenVINO GenAI
-  （拆分 prefill / decode 计时），便于复现 README 性能表。
-- **README 中英双版**：`README.md`（简体中文，默认）+ `README_EN.md`（English），
-  顶部互链。
+- **环境诊断模块** `edge_server/diagnostics.py`：10 类探针（OS / CPU / 内存 /
+  NVIDIA / OpenVINO / 厂商 NPU / 后端 import / llama.cpp 设备 / SSD / 模型目录）
+  并发执行、逐项隔离，输出结构化 JSON + 可读摘要，并给出**能力评估**
+  （明确哪些路径可用、哪些不可用及原因）。含 API Key / token 脱敏。
+- **问题记录** `logs/problems.jsonl`：后端加载失败、推理异常、降级响应、
+  模型下载失败自动落盘，含 traceback 与**环境指纹**。
+- **诊断包导出**：`python -m edge_server.diagnostics --bundle`、
+  `POST /edge/diagnostics/bundle`、GUI「设置 → 环境诊断 → 导出诊断包」，
+  产出含 `diagnostics.json` / `.txt` / `problems.jsonl` / `edge-server.log` 的 zip。
+- **统一日志** `edge_server/logging_setup.py`：滚动文件日志（5 MB × 3）
+  + 主线程/子线程未捕获异常钩子；启动时输出硬件能力快照。
+- 新增 HTTP 端点：`GET /edge/diagnostics`、`POST /edge/diagnostics/bundle`、
+  `GET /edge/problems`、`POST /edge/problems/clear`。
+- 新增环境变量 `EDGE_LOG_LEVEL`、`EDGE_DIAG_BOOT`。
+- 新增文档：`docs/AMD.md`（AMD 平台支持规划）、`docs/TROUBLESHOOTING.md`（排障指南）。
 
 ### Changed
-- README 性能表由 **Qwen3-0.6B** 换为 **Qwen3-8B** 实测，并新增超大 MoE
-  三层卸载章节（80B-A3B 在 8 GB 显存上 `--n-cpu-moe` 扫描结果）。
+- `run_server.py` 接入统一日志与启动诊断；改用 `log_config=None` 避免
+  uvicorn 覆盖日志配置。
+- 降级响应体不再只回显 prompt，而是**明确说明原因**
+  （模型目录不存在 / GGUF 缺 llama-server / IR 缺 openvino_genai /
+  请求 NPU 但本机无 Intel NPU），并指向诊断命令。
+- 两版 README 新增「环境诊断与问题记录」「AMD 平台支持（规划中）」章节；
+  环境变量表与目录结构同步更新。
+- `.gitignore` 忽略 `logs/`。
 
 ### Fixed
-- **速度统计严重失真**：llama.cpp 路径原来用「字符数 ÷ 2」估算 token 与
-  tok/s，慢模型会被大幅低估（80B 实测被报成 0.36 tok/s，真实为 5.0）。
-  改为向 llama-server 请求 `stream_options.include_usage`，直接采用其
-  真实 `usage` 与 `timings`（`predicted_per_second` / `prompt_per_second`），
-  并在 SSE 末帧补充 `prefill_tok_s` / `ttft_ms`。
+- **降级路径静默无记录**：此前走到 `_degrade_text()` 时用户只看到一个回显，
+  既没有日志也没有可排查的线索。现在降级会记录问题条目并在响应中说明原因。
 
 ## [0.2.1] - 2026-11-20
 
 本次版本聚焦 **「同一模型按设备自动切换格式」** + **双推理路线** +
 **UI 全面重构为可交付工作台**，并修复了一批下载状态与思考输出的问题。
+
+### Changed
+- README 性能表由 **Qwen3-0.6B** 换为 **Qwen3-8B** 实测，并新增超大 MoE
+  三层卸载章节（80B-A3B 在 8 GB 显存上 `--n-cpu-moe` 扫描结果）。
+- README 特性表精简：移除 CPU 两行与「NVIDIA via OpenVINO (GPU.1)」行
+  （转为表下脚注），NPU 行标注具体平台 **AI Boost · Core Ultra 7 155H**；
+  中英双版同步。
+- 设备别名归一化（`_norm_dev`）：`NVIDIA GPU` / `nvidia_gpu` / `NVIDIA-GPU`
+  等等价写法统一路由，避免文档里的自然写法落空。
+- README 新增中英双版：`README.md`（简体中文，默认）+ `README_EN.md`（English）。
+- 新增 `scripts/bench_llama.py` / `scripts/bench_ov.py` 性能基准脚本。
 
 ### Added
 - **一键启动**：Tauri 原生窗口启动时自动定位项目根目录与 Python 解释器，
@@ -92,6 +102,15 @@
 - 文档移除第三方产品名，统一为「本地 Agent」表述。
 
 ### Fixed
+- **速度统计严重失真**：llama.cpp 路径原来用「字符数 ÷ 2」估算 token 与
+  tok/s，慢模型会被大幅低估（80B 实测被报成 0.36 tok/s，真实为 5.0）。
+  改为向 llama-server 请求 `stream_options.include_usage`，直接采用其
+  真实 `usage` 与 `timings`（`predicted_per_second` / `prompt_per_second`），
+  并在 SSE 末帧补充 `prefill_tok_s` / `ttft_ms`。
+- **NPU 可用性校验缺失**：此前显式请求 `NPU` 时不检查硬件是否存在。
+  新增 `_NPU_AVAILABLE`（由 OpenVINO `available_devices` 探测），
+  无 NPU 的机器（含 **AMD XDNA / Ryzen AI**，OpenVINO 不枚举该设备）
+  自动回退 CPU；模型列表的设备徽章与 `/edge/devices` 也据此修正。
 - **思考内容泄漏到正文（llama.cpp 路径）**：开启「思考模式」时，整段推理过程
   被当作正文显示，并夹杂 `thinking…/think` 字样，「思考过程」折叠框始终为空。
   根因是 `_llama_stream()` 里开标签被写坏成字面量（丢了 `<` 和 `>`），

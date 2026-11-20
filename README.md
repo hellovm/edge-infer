@@ -353,6 +353,69 @@ print(resp.choices[0].message.content)
 
 ---
 
+## 🩺 环境诊断与问题记录
+
+在**非开发机**上运行时（尤其是 **AMD 平台**），问题往往无法本地复现，
+因此产品内置了完整的自查能力：
+
+- **一键诊断** — 采集 CPU / GPU / NPU / 驱动 / 内存 / 后端 / 模型目录等
+  10 类探针，逐项探测并**记录失败原因**，输出结构化 JSON + 可读摘要。
+- **问题记录** — 后端加载失败、推理异常、模型下载失败都会自动落盘
+  （`logs/problems.jsonl`），含 traceback 与当时的**环境指纹**。
+- **能力评估** — 明确告诉你在本机哪些路径可用、哪些不可用，以及原因。
+
+```bash
+cd python
+python -m edge_server.diagnostics              # 看摘要
+python -m edge_server.diagnostics --bundle     # 生成诊断包（回传即可排查）
+```
+
+GUI 里：「设置 → 环境诊断」可刷新诊断、查看问题记录、一键导出诊断包。
+
+> 本机示例输出（Intel + NVIDIA）：
+> ```
+> NVIDIA CUDA : YES  NVIDIA GeForce RTX 4070 Laptop GPU
+> Intel GPU   : YES  (OpenVINO)
+> Intel NPU   : YES  OpenVINO NPU plugin exposes the device
+> AMD NPU     : not found  -> supported: NO
+> AMD GPU     : not found  -> via ['(no Vulkan/ROCm backend)']
+> ```
+
+诊断包含 10 类探针（`os` / `cpu` / `memory` / `nvidia` / `openvino` /
+`vendor_npu` / `backends` / `llama_devices` / `ssd` / `models`），
+并发执行，每项失败都**不会**影响其它探针。
+
+**隐私**：API Key / token / `sk-*` / `github_pat_*` 全部脱敏；不采集
+prompt 或文件内容。
+
+📖 详见 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)（排障指南）
+
+---
+
+## 🔵 AMD 平台支持（规划中）
+
+当前版本（v0.2.1）支持 **NVIDIA GPU** 与 **Intel GPU / NPU**；
+在 AMD 平台会**安全回退 CPU**（不崩溃，但无加速）。
+
+| 目标 | 可行性 | 路线 |
+|---|---|---|
+| **AMD Radeon 独显** | ✅ **可行** | llama.cpp **ROCm / Vulkan**，复用现有路径 —— **P0** |
+| AMD Radeon 核显 | 🟡 可行，收益有限 | llama.cpp Vulkan（ROCm 在核显上常静默回退 CPU） |
+| **AMD XDNA2 NPU**（Ryzen AI 300/400） | 🔴 架构不兼容 | 需 ONNX Runtime + VitisAI EP 或 FastFlowLM，**无法复用 OpenVINO** |
+| AMD XDNA1 NPU（7040/8040/200） | ⛔ 不可用 | 无主流运行时支持 LLM |
+
+**为什么 NPU 走不通**：OpenVINO 的 GPU / NPU 插件都是 **Intel 专属**，
+在 AMD 上 `core.get_available_devices()` 只返回 `['CPU']` ——
+NPU 插件不会枚举 AMD XDNA。AMD NPU 需要完全独立的
+ONNX Runtime + VitisAI 栈，与 OpenVINO IR / `LLMPipeline` 零兼容。
+
+**优先级：AMD GPU（P0） >> AMD NPU（P2）** —— GPU 复用 llama.cpp 路径，
+改造成本远低于接 NPU。
+
+📖 详见 [`docs/AMD.md`](docs/AMD.md)（完整路线图、实施步骤、任务清单）
+
+---
+
 ## ⚙️ 环境变量
 
 | 变量 | 默认 | 说明 |
@@ -363,8 +426,10 @@ print(resp.choices[0].message.content)
 | `EDGE_PORT` | `8080` | 监听端口 |
 | `EDGE_WORKSPACE` | `./workspace` | Agent 沙箱根目录 |
 | `EDGE_ENABLE_THINKING` | `0` | Qwen3 是否开启 thinking |
-| `EDGE_LLAMA_DIR` | `D:\AI\tools\llama` | 存放 `llama-server.exe` 的目录 |
+| `EDGE_LLAMA_DIR` | `D:\AI\tools\llama` | 存放 `llama-server.exe` 的目录（AMD 可指向 Vulkan/ROCm 构建） |
 | `EDGE_N_CPU_MOE` | `0` | 放在 CPU/内存的 MoE 层数（三层卸载开关） |
+| `EDGE_LOG_LEVEL` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARNING` |
+| `EDGE_DIAG_BOOT` | `0` | `1` = 启动时自动生成诊断包 |
 
 ---
 
@@ -380,6 +445,8 @@ edge-infer/
 ├── python/
 │   ├── edge_server/
 │   │   ├── openai_server.py      FastAPI OpenAI 兼容服务
+│   │   ├── diagnostics.py        环境诊断 + 问题记录 + 诊断包导出
+│   │   ├── logging_setup.py      统一日志（滚动文件 + 异常捕获）
 │   │   ├── llama_backend.py      llama.cpp 后端（GGUF / CUDA 三层卸载）
 │   │   ├── genai_backend.py      OpenVINO GenAI 后端（LLMPipeline）
 │   │   ├── pure_ov_gen.py        纯 OpenVINO VLM 推理
@@ -395,6 +462,10 @@ edge-infer/
 ├── scripts/
 │   ├── bench_llama.py            llama.cpp 基准（封装 llama-bench）
 │   └── bench_ov.py               OpenVINO 基准（拆分 prefill / decode）
+├── docs/
+│   ├── AMD.md                    AMD 平台支持规划（GPU / NPU 路线图）
+│   └── TROUBLESHOOTING.md        疑难排查指南
+├── logs/                         运行日志（诊断包 / problems.jsonl）
 ├── tauri-app/                    Tauri 原生壳
 ├── run_windows.bat               一键启动
 ├── CHANGELOG.md

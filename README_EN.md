@@ -385,6 +385,72 @@ print(resp.choices[0].message.content)
 
 ---
 
+## 🩺 Diagnostics & problem recording
+
+Running on a machine **other than the dev box** (especially an **AMD platform**)
+means a failure often cannot be reproduced locally, so the product can
+**explain itself**:
+
+- **One-shot diagnostics** — 10 independent probes covering CPU / GPU / NPU /
+  drivers / RAM / backends / model dirs; every probe records *why* it failed
+  instead of silently degrading. Outputs structured JSON + a readable summary.
+- **Problem log** — backend-load failures, inference errors and download
+  failures are appended to `logs/problems.jsonl` with a traceback and the
+  **environment fingerprint** at that moment.
+- **Capability assessment** — states plainly which paths are usable on *this*
+  machine, and why the others are not.
+
+```bash
+cd python
+python -m edge_server.diagnostics            # summary
+python -m edge_server.diagnostics --bundle   # zip to send back
+```
+
+In the GUI: *Settings → Diagnostics* — refresh, browse problems, export a bundle.
+
+> Sample output on this dev box (Intel + NVIDIA):
+> ```
+> NVIDIA CUDA : YES  NVIDIA GeForce RTX 4070 Laptop GPU
+> Intel GPU   : YES  (OpenVINO)
+> Intel NPU   : YES  OpenVINO NPU plugin exposes the device
+> AMD NPU     : not found  -> supported: NO
+> AMD GPU     : not found  -> via ['(no Vulkan/ROCm backend)']
+> ```
+
+Probes run **concurrently** and a failure in one never aborts the others.
+
+**Privacy**: API keys / tokens / `sk-*` / `github_pat_*` are redacted; no prompts
+or file contents are ever captured.
+
+📖 See [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
+
+---
+
+## 🔵 AMD platform support (planned)
+
+v0.2.1 supports **NVIDIA GPU** and **Intel GPU / NPU**. On AMD the product
+**falls back to CPU safely** (no crash, but no acceleration).
+
+| Target | Feasibility | Route |
+|---|---|---|
+| **AMD Radeon dGPU** | ✅ **Feasible** | llama.cpp **ROCm / Vulkan**, reusing the existing path — **P0** |
+| AMD Radeon iGPU | 🟡 Feasible, modest gain | llama.cpp Vulkan (ROCm often silently falls back to CPU on iGPUs) |
+| **AMD XDNA2 NPU** (Ryzen AI 300/400) | 🔴 Architecturally incompatible | Needs ONNX Runtime + VitisAI EP or FastFlowLM; **cannot reuse OpenVINO** |
+| AMD XDNA1 NPU (7040/8040/200) | ⛔ Unusable | No mainstream runtime supports LLM inference |
+
+**Why the NPU path is blocked**: OpenVINO's GPU *and* NPU plugins are
+**Intel-only** — on AMD, `core.get_available_devices()` returns just `['CPU']`,
+and the NPU plugin never enumerates AMD XDNA. AMD NPUs need an entirely separate
+ONNX Runtime + VitisAI stack, with zero compatibility with OpenVINO IR /
+`LLMPipeline`.
+
+**Priority: AMD GPU (P0) >> AMD NPU (P2)** — the GPU path reuses llama.cpp and
+costs far less than a new NPU backend.
+
+📖 See [`docs/AMD.md`](docs/AMD.md) for the full roadmap and task list.
+
+---
+
 ## ⚙️ Environment variables
 
 | Variable | Default | Description |
@@ -395,8 +461,10 @@ print(resp.choices[0].message.content)
 | `EDGE_PORT` | `8080` | Listen port |
 | `EDGE_WORKSPACE` | `./workspace` | Agent sandbox root |
 | `EDGE_ENABLE_THINKING` | `0` | Whether Qwen3 runs in thinking mode |
-| `EDGE_LLAMA_DIR` | `D:\AI\tools\llama` | Directory holding `llama-server.exe` |
+| `EDGE_LLAMA_DIR` | `D:\AI\tools\llama` | Directory holding `llama-server.exe` (point it at a Vulkan/ROCm build on AMD) |
 | `EDGE_N_CPU_MOE` | `0` | MoE layers kept on CPU/RAM (3-tier offload knob) |
+| `EDGE_LOG_LEVEL` | `INFO` | Log level: `DEBUG` / `INFO` / `WARNING` |
+| `EDGE_DIAG_BOOT` | `0` | `1` = write a diagnostics bundle at startup |
 
 ---
 
@@ -412,6 +480,8 @@ edge-infer/
 ├── python/
 │   ├── edge_server/
 │   │   ├── openai_server.py      FastAPI OpenAI-compatible service
+│   │   ├── diagnostics.py        env diagnostics + problem log + bundle export
+│   │   ├── logging_setup.py      unified logging (rotating file + excepthooks)
 │   │   ├── llama_backend.py      llama.cpp backend (GGUF / CUDA 3-tier offload)
 │   │   ├── genai_backend.py      OpenVINO GenAI backend (LLMPipeline)
 │   │   ├── pure_ov_gen.py        pure OpenVINO VLM inference
@@ -427,6 +497,10 @@ edge-infer/
 ├── scripts/
 │   ├── bench_llama.py            llama.cpp benchmark (llama-bench wrapper)
 │   └── bench_ov.py               OpenVINO benchmark (prefill / decode split)
+├── docs/
+│   ├── AMD.md                    AMD platform support roadmap
+│   └── TROUBLESHOOTING.md        troubleshooting guide
+├── logs/                         runtime logs (diagnostics / problems.jsonl)
 ├── tauri-app/                    Tauri native shell
 ├── run_windows.bat               one-click launch
 ├── CHANGELOG.md
