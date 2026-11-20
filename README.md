@@ -7,8 +7,10 @@
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![OpenVINO](https://img.shields.io/badge/OpenVINO-2026.4-0091D5.svg)](https://docs.openvino.ai/)
 [![llama.cpp](https://img.shields.io/badge/llama.cpp-CUDA%20%7C%20CPU-6E6E6E.svg)](https://github.com/ggml-org/llama.cpp)
-[![Platform](https://img.shields.io/badge/platform-Windows%2011-0078D6.svg)](#快速开始)
+[![Platform](https://img.shields.io/badge/platform-Windows%2011-0078D6.svg)](#-快速开始)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-24C8DB.svg)](https://tauri.app/)
+
+[English](README_EN.md) · **简体中文**
 
 在 Windows 上运行本地大模型：**Rust 自研三层卸载内核**（SSD / 内存 / 显存）+
 **双推理后端**（NVIDIA → llama.cpp CUDA；Intel GPU / NPU → OpenVINO）+
@@ -27,15 +29,18 @@
   并行把它从慢层拉到快层，用计算掩盖 IO。
 - **双推理路线（按硬件匹配最快的后端）** — 同一份配置下自动分流：
 
-  | 硬件 | 后端 | 实测 tok/s（Qwen3-0.6B Q4） |
+  | 硬件 | 后端 | 实测 decode tok/s（Qwen3-8B Q4_K_M） |
   |---|---|---|
-  | NVIDIA GPU | **llama.cpp CUDA** | **126.7** |
-  | Intel GPU (Arc) | OpenVINO | 27.1 |
-  | CPU | OpenVINO | 28.8 |
-  | NVIDIA via OpenVINO | （不推荐） | 6.1 ← 慢 ~20× |
+  | NVIDIA GPU (RTX 4070 Laptop) | **llama.cpp CUDA** | **43.3** |
+  | Intel GPU (Arc iGPU) | OpenVINO (GPU.0) | 12.0 |
+  | Intel NPU (AI Boost) | OpenVINO (NPU) | 6.4 |
+  | CPU | llama.cpp | 4.5 |
+  | CPU | OpenVINO | 3.5 |
+  | NVIDIA via OpenVINO (GPU.1) | （不推荐） | 2.3 ← 慢约 19× |
 
-  关键结论：**OpenVINO 的 GPU 插件面向 Intel 优化，把 N 卡交给它等于浪费 20 倍性能**。
+  关键结论：**OpenVINO 的 GPU 插件面向 Intel 优化，把 N 卡交给它等于浪费约 19 倍性能**。
   因此 N 卡一律走 llama.cpp CUDA，Intel GPU / NPU 走 OpenVINO。
+  （完整的 prefill / decode 与测试条件见 [性能实测](#-性能实测)。）
 
 - **同一模型按设备自动匹配格式** — 模型目录按「模型 → 变体」组织：同一个模型名下
   挂 `nvidia` / `intel-gpu` / `npu` 多套变体，选中硬件后自动取对应格式
@@ -98,6 +103,43 @@ Unsupported DynamicDequantizeOp configuration:
 
 ---
 
+## 📊 性能实测
+
+测试机：**Intel Core Ultra 7 155H**（16 线程）+ **Intel Arc iGPU** +
+**Intel AI Boost NPU（NPU3720）** + **NVIDIA RTX 4070 Laptop 8 GB（sm_89）** +
+**32 GB DDR5-5600**，Windows 11。
+工具链：llama.cpp `b12559`（CUDA 12）、OpenVINO `2026.4.1`。
+
+测试模型：**Qwen3-8B Q4_K_M（GGUF）** / **Qwen3-8B int4-cw（OpenVINO IR）**——
+同一个模型，各自用对应设备偏好的格式。
+
+| 后端 · 设备 | Prefill tok/s | **Decode tok/s** | 相对倍率 |
+|---|---|---|---|
+| llama.cpp CUDA · RTX 4070 8 GB | 2381.8 | **43.3** | 1.00× |
+| OpenVINO · Intel Arc iGPU | 1297.7 | 12.0 | 慢 3.6× |
+| OpenVINO · Intel NPU | 35.0 | 6.4 | 慢 6.8× |
+| llama.cpp · CPU（16 线程） | 198.7 | 4.5 | 慢 9.6× |
+| OpenVINO · CPU | 283.3 | 3.5 | 慢 12.4× |
+| OpenVINO · NVIDIA（GPU.1） | 26.2 | **2.3** | **慢 18.8×** |
+
+测法：`llama-bench`（`-p 512 -n 128`，3 次取优）与 `scripts/bench_ov.py`
+（531 token 提示词、生成 128 token、2 次取优）。Prefill = 提示词处理，
+decode = 稳态生成。
+
+### 怎么读这组数
+
+- **N 卡一律走 llama.cpp CUDA。** RTX 4070 在两个维度都碾压其它选项；
+  交给 OpenVINO（GPU.1）decode 慢 **18.8×**、prefill 慢 **91×** ——
+  OpenVINO 的 GPU 插件是为 Intel 芯片打造的。
+- **Intel Arc 核显是非 N 卡里的最强选项** —— prefill 只比 4070 慢 1.8×，
+  而且它共享系统内存，能承载超出独显预算的模型。
+- **NPU 面向常驻低功耗**，不是吞吐：6.4 tok/s，但功耗只有零头。
+  它没有独立显存，因此走 SSD + 内存两层分片。
+- **CPU 上 prefill 与 decode 差距悬殊。** CPU 对提示词处理做了良好向量化
+  （198–283 tok/s），但每生成一个 token 都受内存带宽限制，所以 decode 只有 4.5 tok/s。
+
+---
+
 ## 📦 推荐模型（按硬件 · 偏重超大 MoE）
 
 本项目的价值在于**让原本跑不动的大模型跑起来**，所以推荐的都是 **MoE 混合专家**模型 ——
@@ -113,7 +155,7 @@ Unsupported DynamicDequantizeOp configuration:
 | **Qwen3-8B** | 8B | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 5.0 / 4.75 GB | SSD + 内存（+ 显存） |
 | **MiniCPM-V-4.5** | 9B · 多模态 | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 6.0 / 5.26 GB | SSD + 内存（+ 显存） |
 
-- **N 卡**：一律走 **llama.cpp CUDA**（实测 126.7 tok/s；交给 OpenVINO 只有 6.1）。
+- **N 卡**：一律走 **llama.cpp CUDA**（8B 实测 43.3 tok/s；交给 OpenVINO 只有 2.3）。
   从 35B-A3B 到 80B-A3B —— 8 GB 显存也能跑，靠三层卸载。
 - **i 卡**：走 **OpenVINO**（Arc 上比 Vulkan 快约 1.8×），30B / 35B MoE 均可卸载。
 - **NPU**：本身就用系统内存（无独立显存层），因此走 **SSD + 内存两层分片**；
@@ -291,6 +333,8 @@ print(resp.choices[0].message.content)
 | `EDGE_PORT` | `8080` | 监听端口 |
 | `EDGE_WORKSPACE` | `./workspace` | Agent 沙箱根目录 |
 | `EDGE_ENABLE_THINKING` | `0` | Qwen3 是否开启 thinking |
+| `EDGE_LLAMA_DIR` | `D:\AI\tools\llama` | 存放 `llama-server.exe` 的目录 |
+| `EDGE_N_CPU_MOE` | `0` | 放在 CPU/内存的 MoE 层数（三层卸载开关） |
 
 ---
 
@@ -318,6 +362,9 @@ edge-infer/
 │   ├── requirements.txt
 │   ├── run_server.py
 │   └── verify_4b.py
+├── scripts/
+│   ├── bench_llama.py            llama.cpp 基准（封装 llama-bench）
+│   └── bench_ov.py               OpenVINO 基准（拆分 prefill / decode）
 ├── tauri-app/                    Tauri 原生壳
 ├── run_windows.bat               一键启动
 ├── CHANGELOG.md
@@ -331,6 +378,10 @@ edge-infer/
 ```bash
 cd python && python verify_4b.py    # 设备探测 + OpenAI 契约 + 真实推理
 cargo test                          # Rust 内核单测
+
+# 性能复现
+python scripts/bench_llama.py models/qwen3-8b-gguf/Qwen3-8B-Q4_K_M.gguf --ngl 999
+python scripts/bench_ov.py models/qwen3-8b-int4-cw-ov NPU
 ```
 
 ---
