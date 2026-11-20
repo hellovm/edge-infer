@@ -1,0 +1,21 @@
+[package]
+name = "edge-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Orchestration: wire detect -> tiers -> prefetch into a runnable plan; FFI surface for the Tauri GUI / OpenAI server"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+edge-detect = { path = "../edge-detect" }
+edge-tiers = { path = "../edge-tiers" }
+edge-prefetch = { path = "../edge-prefetch" }
+
+[lib]
+name = "edge_engine"
+
+[[bin]]
+name = "edge-engine"
+path = "src/main.rs"
