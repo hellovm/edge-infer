@@ -41,6 +41,16 @@ except Exception:
     is_llm_dir = None  # type: ignore
     _GENAI_AVAILABLE = False
 
+# GGUF path: llama.cpp llama-server (needed for MoE beyond OpenVINO's 35B ceiling).
+try:
+    from .llama_backend import LlamaBackend, LlamaConfig, llama_available
+    _LLAMA_AVAILABLE = True
+except Exception:
+    LlamaBackend = None  # type: ignore
+    LlamaConfig = None  # type: ignore
+    llama_available = None  # type: ignore
+    _LLAMA_AVAILABLE = False
+
 # Local agent tools (filesystem sandbox + tool loop).
 try:
     from .agent_tools import (
@@ -99,6 +109,7 @@ app.add_middleware(
 _gen = None  # lazily-loaded PureOVGenerator (VLM path)
 _gen_device: Optional[str] = None
 _genai = GenaiBackend() if _GENAI_AVAILABLE else None  # NPU/LLM path
+_llama = LlamaBackend() if _LLAMA_AVAILABLE else None  # GGUF path (llama.cpp)
 _MODELS_DIR = os.path.join(_REPO_ROOT, "models")
 
 # Serve the GUI at "/" (works in a plain browser; the Tauri shell reuses the
@@ -156,6 +167,7 @@ def list_models(authorization: Optional[str] = Header(default=None)):
 
 @app.get("/health")
 def health():
+    gguf = _find_gguf(DEFAULT_MODEL_DIR) if os.path.isdir(DEFAULT_MODEL_DIR) else None
     return {
         "ok": True,
         "backend_available": _GEN_AVAILABLE,
@@ -163,6 +175,13 @@ def health():
         "device": _gen_device,
         "model_dir": DEFAULT_MODEL_DIR,
         "model_dir_exists": os.path.isdir(DEFAULT_MODEL_DIR),
+        "backends": {
+            "openvino": _GEN_AVAILABLE,
+            "openvino_genai": _GENAI_AVAILABLE,
+            "llama_cpp": _LLAMA_AVAILABLE,
+            "llama_cpp_running": bool(_llama and _llama.running()),
+        },
+        "gguf_model": gguf,
     }
 
 
@@ -411,6 +430,88 @@ def _ensure_generator():
     return _gen
 
 
+def _find_gguf(model_dir: str) -> Optional[str]:
+    """Return the largest *.gguf under model_dir (a GGUF checkpoint), else None."""
+    best, best_sz = None, -1
+    if not os.path.isdir(model_dir):
+        return None
+    for root, _dirs, files in os.walk(model_dir):
+        for f in files:
+            if f.endswith(".gguf") and "mmproj" not in f.lower():
+                p = os.path.join(root, f)
+                try:
+                    sz = os.path.getsize(p)
+                except OSError:
+                    continue
+                if sz > best_sz:
+                    best, best_sz = p, sz
+    return best
+
+
+def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
+    """Proxy a streaming completion to a local llama-server (OpenAI API).
+
+    Longer-term the Rust kernel will drive llama.cpp's C API directly for
+    fine-grained tier control; via HTTP we still get ``--n-cpu-moe`` offload.
+    """
+    import json as _j
+    import urllib.request
+
+    if not _llama.running() or (_llama._cfg and _llama._cfg.model_path != gguf_path):
+        _llama.load(LlamaConfig(model_path=gguf_path, port=8081))
+
+    msgs = []
+    if system:
+        msgs.append({"role": "system", "content": system})
+    # Qwen3 defaults to thinking mode via llama.cpp (content lands in
+    # reasoning_content). Prepend /no_think unless the caller wants thinking.
+    content = user
+    if not getattr(req, "enable_thinking", False) and "/no_think" not in content:
+        content = "/no_think\n" + content
+    msgs.append({"role": "user", "content": content})
+    payload = _j.dumps({
+        "messages": msgs,
+        "max_tokens": req.max_tokens,
+        "temperature": req.temperature,
+        "stream": True,
+    }).encode()
+
+    r = urllib.request.Request(
+        _llama.base + "/v1/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    t0 = time.time()
+    nchars = 0
+    with urllib.request.urlopen(r, timeout=600) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                obj = _j.loads(data)
+                d = obj["choices"][0].get("delta", {})
+                delta = d.get("content") or d.get("reasoning_content") or ""
+            except Exception:
+                continue
+            if delta:
+                nchars += len(delta)
+                yield frame(delta)
+    dt = max(time.time() - t0, 1e-3)
+    comp = max(nchars // 2, 1)
+    yield frame("", finish="stop", usage={
+        "prompt_tokens": max(len(user) // 2, 1),
+        "completion_tokens": comp,
+        "total_tokens": max(len(user) // 2, 1) + comp,
+        "est_tok_s": round(comp / dt, 2),
+        "device": "llama.cpp",
+    })
+
+
 @app.post("/v1/chat/completions")
 def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
     _check_auth(authorization)
@@ -464,9 +565,13 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
                     obj["usage"] = usage
                 return sse(obj)
 
-            use_genai = _GENAI_AVAILABLE and model_ok and is_llm_dir(DEFAULT_MODEL_DIR)
+            gguf = _find_gguf(DEFAULT_MODEL_DIR) if model_ok else None
+            use_llama = _LLAMA_AVAILABLE and gguf is not None
+            use_genai = (not use_llama) and _GENAI_AVAILABLE and model_ok and is_llm_dir(DEFAULT_MODEL_DIR)
             try:
-                if use_genai:
+                if use_llama:
+                    yield from _llama_stream(frame, gguf, req, system, user)
+                elif use_genai:
                     _genai.load(
                         DEFAULT_MODEL_DIR, device=dev,
                         cache_dir=os.path.join(DEFAULT_MODEL_DIR, ".npu_cache", dev),
@@ -511,6 +616,21 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     # ---- non-streaming ----
+    gguf = _find_gguf(DEFAULT_MODEL_DIR) if model_ok else None
+    if _LLAMA_AVAILABLE and gguf is not None:
+        try:
+            t0 = time.time()
+            chunks = []
+            for piece in _llama_stream(lambda d, **k: d, gguf, req, system, user):
+                chunks.append(piece)
+            text = "".join(chunks)
+            dt = max(time.time() - t0, 1e-3)
+            comp = max(len(text) // 2, 1)
+            return _resp(req.model, text, prompt_tokens=max(len(user) // 2, 1),
+                         completion_tokens=comp, tok_s=comp / dt, device="llama.cpp")
+        except Exception as e:  # noqa: BLE001
+            print(f"[edge-infer] llama.cpp path failed, falling back: {e}")
+
     if _GENAI_AVAILABLE and model_ok and is_llm_dir(DEFAULT_MODEL_DIR):
         try:
             _genai.load(
@@ -531,7 +651,8 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
             print(f"[edge-infer] genai path failed, falling back: {e}")
 
     # VLM path (pure OpenVINO) / degradation.
-    if not _GEN_AVAILABLE or not model_ok:
+    if not _GEN_AVAILABLE or not model_ok or (gguf is not None and not is_llm_dir(DEFAULT_MODEL_DIR)):
+        # Not a VLM-IR directory (e.g. GGUF-only) → don't try PureOVGenerator.
         return _resp(req.model, _degrade_text(), prompt_tokens=len(req.messages),
                      completion_tokens=-1, tok_s=0.0, degraded=True)
 

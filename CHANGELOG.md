@@ -23,6 +23,10 @@ v0.2.0 之后的增量（版本号待正式发布时再定）。
   `/edge/catalog` 端点（含已安装标记），点击卡片直接下载。
   支持 GGUF 仓库按文件白名单下载（避免误拉多个量化版本，80B 仓库全量 >3 TB）。
   另新增 `/edge/downloads` 查看下载状态。
+- **llama.cpp 后端**（`llama_backend.py`）：支持 GGUF 模型，覆盖 OpenVINO IR
+  无法承载的更大 MoE（80B-A3B 及以上）。以子进程方式管理 `llama-server`，
+  通过 `--n-cpu-moe` 把 MoE 层放到 CPU/内存实现三层卸载；`/v1/chat/completions`
+  自动按模型格式（GGUF vs OpenVINO IR）路由到对应后端，含 SSE 流式。
 - **运行时设备切换**：`/edge/device/set`、`/edge/device/current`，
   NVIDIA GPU / Intel NPU / CPU / AUTO 真正生效。
 - **思考模式开关**：关闭时过滤 `think` 块，开启时以折叠框展示思考过程。
