@@ -38,3 +38,13 @@ desktop.ini
 
 # ---- Runtime logs (diagnostics bundles, problem records) ----
 logs/
+
+# ---- Internal docs & dev scripts (not part of the public release) ----
+docs/
+scripts/
+python/verify_4b.py
+
+# ---- Dev scratch ----
+.tmp/
+*.part
+*.incomplete

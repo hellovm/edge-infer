@@ -119,9 +119,8 @@ Unsupported DynamicDequantizeOp configuration:
 | OpenVINO · Intel Arc iGPU | 1297.7 | 12.0 | 慢 3.6× |
 | OpenVINO · Intel NPU（AI Boost · Core Ultra 7 155H） | 35.0 | 6.4 | 慢 6.8× |
 
-测法：`llama-bench`（`-p 512 -n 128`，3 次取优）与 `scripts/bench_ov.py`
-（531 token 提示词、生成 128 token、2 次取优）。Prefill = 提示词处理，
-decode = 稳态生成。
+测法：`llama-bench`，`-p 512 -n 128`，3 次取优。
+Prefill = 提示词处理，decode = 稳态生成。
 
 > 另外两路对照（同为 Qwen3-8B，未计入主表）：**CPU** 上 llama.cpp 198.7 / 4.5、
 > OpenVINO 283.3 / 3.5 tok/s；**NVIDIA 经 OpenVINO（GPU.1）** 仅 26.2 / 2.3 tok/s，
@@ -150,10 +149,8 @@ decode = 稳态生成。
 | 44 | 46.0 ±10 | 3.5 | ⚠️ pp 虚高抖动 |
 | 48 | 43.5 ±13 | 3.2 | ⚠️ 抖动 |
 
-> 卸载越多显存压力越小，但 **ncmoe≥40 时 CPU 侧专家需约 30 GB**，
-> 超过本机空闲内存（~21 GB）触发换页 —— decode 在 2–5 tok/s 间剧烈抖动、不可复现。
-> **ncmoe=30 是稳定平衡点。** 完整分析（含「省电模式」复测）见
-> [Qwen3.8-Flash-Next 方案](docs/QWEN38_FLASH_NEXT.md)。
+> 卸载越多显存压力越小，但 ncmoe 过大会让专家权重超出可用内存、触发换页而变慢。
+> **ncmoe=30 是稳定平衡点。**
 
 ### 怎么读这组数
 
@@ -168,7 +165,17 @@ decode = 稳态生成。
   （1298/12.0）——OpenVINO 是 Intel 的原生优化路径；30B/35B MoE 无 IR 版时，
   Vulkan + `--n-cpu-moe` 是可行解。
 - **Qwen3.8-Flash-Next 仅 N 卡可行**：66.4 GB 权重、无 OpenVINO IR 版，
-  I 卡 / NPU 路径均不可行，详见 [方案文档](docs/QWEN38_FLASH_NEXT.md)。
+  I 卡 / NPU 路径均不可行。
+
+### 大模型运行方式对比
+
+同样是"小显存跑大模型"，不同方式的取舍不同：
+
+| 方式 | 显存门槛 | 速度 | 精度 | 特点 |
+|---|---|---|---|---|
+| 量化后全量驻留显存 | 高（需装下权重） | 快 | 有量化损失 | 显存够时体验最好 |
+| 逐层流式加载 | 低（单层即可） | 慢（秒级/token） | 可保持原精度 | 每个 token 都读盘，适合离线 |
+| **本项目三层卸载** | **低（8 GB 起）** | **中等** | GGUF 量化 | 专家常驻内存、大表留 SSD，兼顾门槛与速度 |
 
 ---
 
@@ -246,15 +253,12 @@ llama-server -m .../Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
   -ngl 999 -ncmoe 30 -c 32768 -ctk q8_0 -ctv q8_0 -fa on
 ```
 
-> `-ncmoe 30` 是复测确认的稳定最优点（pp 16.9 / decode 3.6 tok/s）。
-> 更大的值（40/44/48）decode 在内存边界剧烈抖动、数字不可信，反而更慢。
+> `-ncmoe 30` 是稳定最优点（pp 16.9 / decode 3.6 tok/s）。
+> 更大的值会因专家权重超出可用内存而变慢。
 
-> 关键机制：本机 llama.cpp 的 `--lazy-mode` 默认 `auto`，
+> 关键机制：llama.cpp 的 `--lazy-mode` 默认 `auto`，
 > **对 >4 GiB 的张量自动按需读取** —— n-gram 表 28.8 GB 正好命中，
 > 开箱即用就会留在磁盘上。
-
-📖 完整方案（规格 / 内存预算 / 调优 / 已知限制）见
-[`docs/QWEN38_FLASH_NEXT.md`](docs/QWEN38_FLASH_NEXT.md)
 
 ---
 
@@ -446,31 +450,21 @@ GUI 里：「设置 → 环境诊断」可刷新诊断、查看问题记录、�
 **隐私**：API Key / token / `sk-*` / `github_pat_*` 全部脱敏；不采集
 prompt 或文件内容。
 
-📖 详见 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)（排障指南）
-
 ---
 
-## 🔵 AMD 平台支持（规划中）
+## 🔵 AMD 平台兼容性
 
 当前版本（v0.2.1）支持 **NVIDIA GPU** 与 **Intel GPU / NPU**；
 在 AMD 平台会**安全回退 CPU**（不崩溃，但无加速）。
 
-| 目标 | 可行性 | 路线 |
-|---|---|---|
-| **AMD Radeon 独显** | ✅ **可行** | llama.cpp **ROCm / Vulkan**，复用现有路径 —— **P0** |
-| AMD Radeon 核显 | 🟡 可行，收益有限 | llama.cpp Vulkan（ROCm 在核显上常静默回退 CPU） |
-| **AMD XDNA2 NPU**（Ryzen AI 300/400） | 🔴 架构不兼容 | 需 ONNX Runtime + VitisAI EP 或 FastFlowLM，**无法复用 OpenVINO** |
-| AMD XDNA1 NPU（7040/8040/200） | ⛔ 不可用 | 无主流运行时支持 LLM |
+| 硬件 | 状态 |
+|---|---|
+| AMD Radeon 独显 | 可通过 llama.cpp Vulkan 加速 |
+| AMD Radeon 核显 | 可用，收益有限 |
+| AMD XDNA NPU（Ryzen AI） | 暂不支持 |
 
-**为什么 NPU 走不通**：OpenVINO 的 GPU / NPU 插件都是 **Intel 专属**，
-在 AMD 上 `core.get_available_devices()` 只返回 `['CPU']` ——
-NPU 插件不会枚举 AMD XDNA。AMD NPU 需要完全独立的
-ONNX Runtime + VitisAI 栈，与 OpenVINO IR / `LLMPipeline` 零兼容。
-
-**优先级：AMD GPU（P0） >> AMD NPU（P2）** —— GPU 复用 llama.cpp 路径，
-改造成本远低于接 NPU。
-
-📖 详见 [`docs/AMD.md`](docs/AMD.md)（完整路线图、实施步骤、任务清单）
+OpenVINO 的 GPU / NPU 插件为 Intel 专属，无法驱动 AMD XDNA NPU，
+相关支持仍在规划中。
 
 ---
 
@@ -518,15 +512,7 @@ edge-infer/
 │   │   ├── download_modelscope.py ModelScope 下载
 │   │   └── static/index.html     工作台 GUI
 │   ├── requirements.txt
-│   ├── run_server.py
-│   └── verify_4b.py
-├── scripts/
-│   ├── bench_llama.py            llama.cpp 基准（封装 llama-bench）
-│   └── bench_ov.py               OpenVINO 基准（拆分 prefill / decode）
-├── docs/
-│   ├── AMD.md                    AMD 平台支持规划（GPU / NPU 路线图）
-│   ├── TROUBLESHOOTING.md        疑难排查指南
-│   └── QWEN38_FLASH_NEXT.md      Qwen3.8-Flash-Next 三层卸载方案
+│   └── run_server.py
 ├── logs/                         运行日志（诊断包 / problems.jsonl）
 ├── tauri-app/                    Tauri 原生壳
 ├── run_windows.bat               一键启动
@@ -539,17 +525,7 @@ edge-infer/
 ## ✅ 验证
 
 ```bash
-cd python && python verify_4b.py    # 设备探测 + OpenAI 契约 + 真实推理
-cargo test                          # Rust 内核单测
-
-# 性能复现
-python scripts/bench_llama.py models/qwen3-8b-gguf/Qwen3-8B-Q4_K_M.gguf --ngl 999
-python scripts/bench_ov.py models/qwen3-8b-int4-cw-ov NPU
-
-# Qwen3.8-Flash-Next 三层卸载（需 LLAMA_ATTN_ROT_DISABLE=1）
-LLAMA_ATTN_ROT_DISABLE=1 EDGE_LLAMA_DIR=D:/AI/tools/llama D:/AI/tools/llama/llama-bench.exe \
-  -m models/qwen3.8-flash-next-gguf/UD-IQ1_S/Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
-  -ngl 999 -ncmoe 30 -p 512 -n 128 -r 2
+cargo test    # Rust 内核单测
 ```
 
 ---

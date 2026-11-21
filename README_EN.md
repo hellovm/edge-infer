@@ -133,9 +133,8 @@ the same model, in the format each device prefers.
 | OpenVINO · Intel Arc iGPU | 1297.7 | 12.0 | 3.6× slower |
 | OpenVINO · Intel NPU (AI Boost · Core Ultra 7 155H) | 35.0 | 6.4 | 6.8× slower |
 
-Measured with `llama-bench` (`-p 512 -n 128`, 3 reps) and `scripts/bench_ov.py`
-(531-token prompt, 128 generated tokens, 2 reps). Prefill = prompt processing,
-decode = steady-state generation.
+Measured with `llama-bench` (`-p 512 -n 128`, 3 reps).
+Prefill = prompt processing, decode = steady-state generation.
 
 > Two further references (also Qwen3-8B, kept out of the main table): **CPU**
 > via llama.cpp is 198.7 / 4.5 and via OpenVINO 283.3 / 3.5 tok/s;
@@ -166,11 +165,8 @@ n-gram table stays on SSD via `--lazy-mode`:
 | 44 | 46.0 ±10 | 3.5 | ⚠️ inflated pp, jitter |
 | 48 | 43.5 ±13 | 3.2 | ⚠️ jitter |
 
-> More offload means less VRAM pressure, but **at ncmoe≥40 the CPU-side experts
-> need ~30 GB**, exceeding this machine's free RAM (~21 GB) and triggering
-> paging — decode swings wildly between 2–5 tok/s and is not reproducible.
-> **ncmoe=30 is the stable sweet spot.** Full analysis (incl. the "power-saving
-> mode" retest) is in [the Qwen3.8-Flash-Next plan](docs/QWEN38_FLASH_NEXT.md).
+> More offload means less VRAM pressure, but too much spills experts beyond
+> available memory and slows things down. **ncmoe=30 is the stable sweet spot.**
 
 ### Reading the numbers
 
@@ -187,7 +183,17 @@ n-gram table stays on SSD via `--lazy-mode`:
   **slower** than OpenVINO (1298/12.0) — OpenVINO is Intel's native optimized
   path; for 30B/35B MoE with no IR build, Vulkan + `--n-cpu-moe` works.
 - **Qwen3.8-Flash-Next is NVIDIA-only**: 66.4 GB weights and no OpenVINO IR —
-  the iGPU / NPU paths are not viable, see [the plan](docs/QWEN38_FLASH_NEXT.md).
+  the iGPU / NPU paths are not viable.
+
+### How approaches compare
+
+Different ways to run large models on limited VRAM involve different trade-offs:
+
+| Approach | VRAM needed | Speed | Accuracy | Notes |
+|---|---|---|---|---|
+| Quantized, fully resident | High (must fit weights) | Fast | Some loss | Best when VRAM is enough |
+| Layer-by-layer streaming | Low (one layer) | Slow (seconds/token) | Can stay full precision | Reads disk every token; offline use |
+| **This project: 3-tier offload** | **Low (from 8 GB)** | **Moderate** | GGUF quantization | Experts resident in RAM, large tables on SSD — balances threshold and speed |
 
 ---
 
@@ -278,9 +284,6 @@ llama-server -m .../Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
 > Key mechanism: this build's `--lazy-mode` defaults to `auto`, which reads
 > **any tensor larger than 4 GiB** on demand — the 28.8 GB n-gram table
 > qualifies, so it stays on disk out of the box.
-
-📖 Full plan (spec / memory budget / tuning / limits):
-[`docs/QWEN38_FLASH_NEXT.md`](docs/QWEN38_FLASH_NEXT.md)
 
 ---
 
@@ -478,32 +481,21 @@ Probes run **concurrently** and a failure in one never aborts the others.
 **Privacy**: API keys / tokens / `sk-*` / `github_pat_*` are redacted; no prompts
 or file contents are ever captured.
 
-📖 See [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
-
 ---
 
-## 🔵 AMD platform support (planned)
+## 🔵 AMD platform compatibility
 
 v0.2.1 supports **NVIDIA GPU** and **Intel GPU / NPU**. On AMD the product
 **falls back to CPU safely** (no crash, but no acceleration).
 
-| Target | Feasibility | Route |
-|---|---|---|
-| **AMD Radeon dGPU** | ✅ **Feasible** | llama.cpp **ROCm / Vulkan**, reusing the existing path — **P0** |
-| AMD Radeon iGPU | 🟡 Feasible, modest gain | llama.cpp Vulkan (ROCm often silently falls back to CPU on iGPUs) |
-| **AMD XDNA2 NPU** (Ryzen AI 300/400) | 🔴 Architecturally incompatible | Needs ONNX Runtime + VitisAI EP or FastFlowLM; **cannot reuse OpenVINO** |
-| AMD XDNA1 NPU (7040/8040/200) | ⛔ Unusable | No mainstream runtime supports LLM inference |
+| Hardware | Status |
+|---|---|
+| AMD Radeon dGPU | Can be accelerated via llama.cpp Vulkan |
+| AMD Radeon iGPU | Supported, modest gain |
+| AMD XDNA NPU (Ryzen AI) | Not supported yet |
 
-**Why the NPU path is blocked**: OpenVINO's GPU *and* NPU plugins are
-**Intel-only** — on AMD, `core.get_available_devices()` returns just `['CPU']`,
-and the NPU plugin never enumerates AMD XDNA. AMD NPUs need an entirely separate
-ONNX Runtime + VitisAI stack, with zero compatibility with OpenVINO IR /
-`LLMPipeline`.
-
-**Priority: AMD GPU (P0) >> AMD NPU (P2)** — the GPU path reuses llama.cpp and
-costs far less than a new NPU backend.
-
-📖 See [`docs/AMD.md`](docs/AMD.md) for the full roadmap and task list.
+OpenVINO's GPU / NPU plugins are Intel-only and cannot drive AMD XDNA NPUs;
+support is on the roadmap.
 
 ---
 
@@ -551,15 +543,7 @@ edge-infer/
 │   │   ├── download_modelscope.py ModelScope downloader
 │   │   └── static/index.html     workbench GUI
 │   ├── requirements.txt
-│   ├── run_server.py
-│   └── verify_4b.py
-├── scripts/
-│   ├── bench_llama.py            llama.cpp benchmark (llama-bench wrapper)
-│   └── bench_ov.py               OpenVINO benchmark (prefill / decode split)
-├── docs/
-│   ├── AMD.md                    AMD platform support roadmap
-│   ├── TROUBLESHOOTING.md        troubleshooting guide
-│   └── QWEN38_FLASH_NEXT.md     Qwen3.8-Flash-Next 3-tier offload plan
+│   └── run_server.py
 ├── logs/                         runtime logs (diagnostics / problems.jsonl)
 ├── tauri-app/                    Tauri native shell
 ├── run_windows.bat               one-click launch
@@ -572,17 +556,7 @@ edge-infer/
 ## ✅ Verification
 
 ```bash
-cd python && python verify_4b.py    # device probe + OpenAI contract + real inference
-cargo test                          # Rust kernel unit tests
-
-# performance
-python scripts/bench_llama.py models/qwen3-8b-gguf/Qwen3-8B-Q4_K_M.gguf --ngl 999
-python scripts/bench_ov.py models/qwen3-8b-int4-cw-ov NPU
-
-# Qwen3.8-Flash-Next 3-tier offloading (needs LLAMA_ATTN_ROT_DISABLE=1)
-LLAMA_ATTN_ROT_DISABLE=1 D:/AI/tools/llama/llama-bench.exe \
-  -m models/qwen3.8-flash-next-gguf/UD-IQ1_S/Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
-  -ngl 999 -ncmoe 30 -p 512 -n 128 -r 2
+cargo test    # Rust kernel unit tests
 ```
 
 ---
