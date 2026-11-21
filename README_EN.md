@@ -3,7 +3,7 @@
 **On-device 3-tier offloading inference platform · local AI workbench**
 
 [![Version](https://img.shields.io/badge/version-0.2.1-2ea44f.svg)](CHANGELOG.md)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Free%20personal%20%7C%20Commercial-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![OpenVINO](https://img.shields.io/badge/OpenVINO-2026.4-0091D5.svg)](https://docs.openvino.ai/)
 [![llama.cpp](https://img.shields.io/badge/llama.cpp-CUDA%20%7C%20CPU-6E6E6E.svg)](https://github.com/ggml-org/llama.cpp)
@@ -563,4 +563,11 @@ cargo test    # Rust kernel unit tests
 
 ## 📄 License
 
-[Apache-2.0](LICENSE) © 2026 David
+**Free for personal use; commercial use requires a license** — see [LICENSE](LICENSE).
+
+Personal learning, research, and non-profit use is free, including modification.
+For commercial use within an organization, or for inclusion in a paid product or
+service, please contact the author via [GitHub Issues](https://github.com/hellovm/edge-infer/issues)
+to obtain a commercial license.
+
+© 2026 David

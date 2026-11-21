@@ -3,7 +3,7 @@
 **端侧三层卸载多硬件推理平台 · 本地 AI 工作台**
 
 [![Version](https://img.shields.io/badge/version-0.2.1-2ea44f.svg)](CHANGELOG.md)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-个人免费%20·%20商用授权-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![OpenVINO](https://img.shields.io/badge/OpenVINO-2026.4-0091D5.svg)](https://docs.openvino.ai/)
 [![llama.cpp](https://img.shields.io/badge/llama.cpp-CUDA%20%7C%20CPU-6E6E6E.svg)](https://github.com/ggml-org/llama.cpp)
@@ -532,4 +532,10 @@ cargo test    # Rust 内核单测
 
 ## 📄 License
 
-[Apache-2.0](LICENSE) © 2026 David
+**个人免费使用，商业使用需授权** —— 详见 [LICENSE](LICENSE)。
+
+个人学习、研究、非营利用途可免费使用与修改；在公司/组织中用于商业目的、
+或集成进收费产品/服务前，请通过 [GitHub Issues](https://github.com/hellovm/edge-infer/issues)
+联系作者获取商业授权。
+
+© 2026 David

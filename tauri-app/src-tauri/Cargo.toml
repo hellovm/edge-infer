@@ -3,7 +3,7 @@ name = "edge-gui"
 version = "0.2.1"
 edition = "2021"
 description = "edge-infer Tauri GUI: 三层卸载多硬件推理工作台"
-license = "Apache-2.0"
+license = "LicenseRef-EdgeInfer-Dual"
 
 # Keep the GUI crate out of the parent edge-infer cargo workspace.
 [workspace]
