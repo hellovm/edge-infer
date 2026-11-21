@@ -2,7 +2,7 @@
 
 > 模型：`Qwen/Qwen3.8-Flash-Next`（2026-08-26 开源，Qwen4 架构预览）
 > 目标：在 **8 GB 显存 + 32 GB 内存 + NVMe SSD** 上跑起来，并保持**大上下文**
-> 状态：架构已验证 ✅ · 权重下载中 · 实测待补
+> 状态：**✅ 已实测跑通** —— 权重 66.38 GB 已下载，三层卸载生效，256K 上下文可用
 
 ---
 
@@ -155,6 +155,43 @@ KV cache 256K   →  2.67 GB (f16) / 1.34 GB (q8_0) → ✅ 大上下文无忧
 
 ## 5. 启动配置
 
+### 5.0 实测结果（本机：RTX 4070 8GB + 32GB + NVMe）
+
+**权重已完整下载 66.38 GB，模型成功加载并推理。**
+
+```
+llama_model_loader: qwen4exp A3B IQ1_S - 1.5625 bpw
+                   61.81 GiB / 176.94 B params      ← 架构与参数量均正确识别
+KV self size    = n_ctx 262144 确认 ✅
+```
+
+| 配置 | Prefill tok/s | Decode tok/s | 备注 |
+|---|---|---|---|
+| `ncmoe=30` + `-c 32768` + q8_0 KV | 15.5（p512）/ 10.0（p2K） | **1.93 / 1.31** | **最优点** |
+| `ncmoe=44` | 4.8（p16） | 1.62 | 卸载过多，反而变慢 |
+| `ncmoe=48` | 3.7（p16） | 1.34 | 更差 |
+| `ncmoe=20` | 3.1（p16） | 1.13 | 显存压力大 |
+| `ncmoe=40` + `-c 32768` | 2.7（p32） | 1.94 | — |
+
+**长上下文召回测试通过** ✅
+
+```
+提示 2014 tok（内文首行埋入「紫罗兰-7391」，中间填充 2000 行无关文本）
+问题：本次项目的内部代号是什么？
+回答：紫罗兰-7391          ← 准确召回
+```
+
+**256K 上下文可用** ✅
+
+```bash
+curl http://127.0.0.1:8091/props
+# → n_ctx: 262144
+```
+
+> **速度解读**：1-2 tok/s 属于「能跑但慢」。瓶颈是**权重总量 61.81 GiB > VRAM 8 + RAM 32**，
+> 相当一部分专家权重必须从 SSD 分页读取。这是物理约束，不是配置问题。
+> 若内存升到 64 GB，可预期 decode 提升到 3-5 tok/s。
+
 ### 5.1 推荐（保守起步）
 
 ```bash
@@ -163,25 +200,29 @@ export LLAMA_ATTN_ROT_DISABLE=1     # qwen4exp 不支持 upstream #21038 的 RoP
 llama-server \
   -m models/qwen3.8-flash-next-gguf/UD-IQ1_S/Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
   -ngl 999 \
-  -ncmoe 40 \
+  -ncmoe 30 \
   -c 32768 \
   -ctk q8_0 -ctv q8_0 \
-  -fa on
+  --no-reasoning-preserve            # 思考模式会吃光 token 预算
 ```
+
+> **注意**：`--n-cpu-moe 30` 是实测最优点。更小的值（20）会挤压显存，
+> 更大的值（44/48）会把过多专家推到慢层，**两头都变慢**。
 
 ### 5.2 大上下文（256K）
 
 ```bash
 llama-server \
   -m .../Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
-  -ngl 999 -ncmoe 44 \
+  -ngl 999 -ncmoe 30 \
   -c 262144 \
   -ctk q8_0 -ctv q8_0 \
-  -fa on \
-  --lazy-mode on
+  --no-reasoning-preserve
 ```
 
-> KV cache: 256K × q8_0 ≈ 1.34 GB，加上 262144 上下文的其他开销，需留 3–4 GB。
+> KV cache 实测：256K × q8_0 ≈ 1.34 GB，加载正常。
+> 但**长提示的 prefill 极慢**（10 tok/s），
+> 11 万 token 的提示约需 3 小时 —— 实用上下文建议 ≤ 32K。
 
 ### 5.3 通过本项目启动
 
@@ -189,13 +230,16 @@ llama-server \
 cd python
 EDGE_DEVICE="NVIDIA GPU" \
 EDGE_MODEL_DIR="../models/qwen3.8-flash-next-gguf/UD-IQ1_S" \
-EDGE_N_CPU_MOE=40 \
+EDGE_N_CPU_MOE=30 \
 EDGE_LLAMA_DIR="D:/AI/tools/llama" \
 python run_server.py
 ```
 
 `llama_backend.py` 会自动加 `--n-cpu-moe`、`--ctx-size`，
 并按 GGUF 类型走 llama.cpp 路径。
+
+> ⚠️ 需手动补 `LLAMA_ATTN_ROT_DISABLE=1` 与 `--no-reasoning-preserve`
+> （当前 `llama_backend.py` 尚未内置，见待办）。
 
 ---
 
@@ -262,11 +306,15 @@ GUI：「设置 → 三层卸载规划」
 
 | 限制 | 说明 | 状态 |
 |---|---|---|
+| **速度 1-2 tok/s** | 权重 61.81 GiB > VRAM 8 + RAM 32，部分专家需从 SSD 分页。物理约束，非配置问题 | 需 64 GB 内存改善 |
+| **长提示 prefill 慢** | 10 tok/s，11 万 token 约需 3 小时。实用上下文建议 ≤ 32K | 可接受 |
 | **上游无 SWA 优化** | qwen4exp 的 dense attention 层 decode 成本随上下文线性增长。第三方 fork（llama.cpp-turboq-mtp）用 Sliding-Window Attention 解决（100K 上下文仍有 15.7 t/s） | 上游缺；可评估 fork |
-| **RoPE rotation** | `LLAMA_ATTN_ROT_DISABLE=1` 可能必需 | 实测确认 |
+| **RoPE rotation** | 必须 `LLAMA_ATTN_ROT_DISABLE=1` | 已确认 |
+| **思考模式吃 token** | 默认开启，短 `max_tokens` 会导致空回答。加 `--no-reasoning-preserve` 或 `/no_think` | 已确认 |
 | **i 卡不可行** | 无 OpenVINO IR 版；Vulkan 路径需 66 GB+ 显存/内存 | 排除 |
 | **无 Ollama 支持** | Ollama 0.33.2 对该 GGUF 报校验错 | 用 llama.cpp 直连 |
-| 首次加载慢 | 66 GB 从磁盘读入，首次启动需数分钟 | 正常 |
+| **mmap + CPU 覆盖的提示** | 加载时警告 `consider using --load-mode none` —— 但那会一次性占用全部内存，**不建议** | 忽略即可 |
+| 首次加载耗时 | 66 GB 从磁盘读入，实测约 45 秒（mmap 惰性） | 正常 |
 
 ---
 
@@ -276,12 +324,15 @@ GUI：「设置 → 三层卸载规划」
 - [x] 核实 GGUF 元数据（层数/专家/上下文）
 - [x] 确认 `--lazy-mode` / `--ple` / `--n-cpu-moe` 可用
 - [x] 内存预算分析
-- [x] 新增 `tier_plan.py` 规划工具
-- [ ] **下载 66.4 GB 权重**（进行中）
-- [ ] 实测启动 + 调优 `ncmoe`
-- [ ] 长上下文实测（32K / 128K / 256K）
-- [ ] 性能数据补进 README 性能表
-- [ ] 评估第三方 SWA fork 的必要性
+- [x] 新增 `tier_plan.py` 规划工具（含 GUI 面板）
+- [x] **下载 66.38 GB 权重**
+- [x] **实测启动**（ncmoe 20/30/40/44/48 全部试过，30 最优）
+- [x] **长上下文验证**（256K 可加载；2K 提示召回通过）
+- [x] 性能数据记录进本文档
+- [ ] **把 `LLAMA_ATTN_ROT_DISABLE` 与 `--no-reasoning-preserve` 内置进 `llama_backend.py`**
+      （目前需手动设置；应按模型架构自动检测 `qwen4exp` 并加参数）
+- [ ] 评估第三方 SWA fork 的必要性（长上下文吞吐提升显著）
+- [ ] 性能数据摘要补进 README 性能表
 
 ---
 

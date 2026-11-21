@@ -53,6 +53,58 @@ def _port_open(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def _read_arch(model_path: str) -> str:
+    """Best-effort read of ``general.architecture`` from a GGUF header.
+
+    Only the first metadata block is parsed, so this is cheap even on a 60 GB
+    file. Split models: pass the ``-00001-of-0000N`` shard.
+    """
+    import struct
+    try:
+        with open(model_path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return ""
+            struct.unpack("<I", f.read(4))           # version
+            struct.unpack("<Q", f.read(8))           # n_tensors
+            n_kv, = struct.unpack("<Q", f.read(8))
+            for _ in range(n_kv):
+                n, = struct.unpack("<Q", f.read(8))
+                key = f.read(n).decode("utf-8", "replace")
+                t, = struct.unpack("<I", f.read(4))
+                if t == 8:                            # string
+                    ln, = struct.unpack("<Q", f.read(8))
+                    val = f.read(ln).decode("utf-8", "replace")
+                elif t == 9:                          # array -> skip
+                    et, = struct.unpack("<I", f.read(4))
+                    cnt, = struct.unpack("<Q", f.read(8))
+                    if et == 8:
+                        for _ in range(cnt):
+                            sl, = struct.unpack("<Q", f.read(8))
+                            f.seek(sl, 1)
+                    else:
+                        f.seek({0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4,
+                                7: 1, 10: 8, 11: 8, 12: 8}.get(et, 4) * cnt, 1)
+                    continue
+                else:
+                    f.seek({0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4,
+                            7: 1, 10: 8, 11: 8, 12: 8}.get(t, 4), 1)
+                    continue
+                if key == "general.architecture":
+                    return val
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+# Architectures that need extra flags. Add here rather than in the GUI so the
+# behaviour travels with the backend.
+_ARCH_FLAGS = {
+    # qwen4exp (Qwen3.8-Flash-Next) does not implement upstream's RoPE rotation
+    # (#21038); without this the results are wrong or the load fails.
+    "qwen4exp": {"env": {"LLAMA_ATTN_ROT_DISABLE": "1"}},
+}
+
+
 @dataclass
 class LlamaConfig:
     model_path: str
@@ -62,6 +114,8 @@ class LlamaConfig:
     ctx: int = 8192
     threads: int = 0             # 0 -> auto
     reasoning: bool = False      # Qwen3 thinking; off by default for chat
+    kv_quant: str = ""           # "" | q8_0 | q4_0 ... (applied to K and V)
+    extra_args: tuple = ()       # escape hatch for arch-specific flags
 
 
 class LlamaBackend:
@@ -70,11 +124,16 @@ class LlamaBackend:
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
         self._cfg: Optional[LlamaConfig] = None
+        self._arch: str = ""
 
     @property
     def base(self) -> str:
         port = self._cfg.port if self._cfg else 8081
         return f"http://127.0.0.1:{port}"
+
+    @property
+    def arch(self) -> str:
+        return self._arch
 
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -92,6 +151,16 @@ class LlamaBackend:
                 " Windows 预编译包，解压到 tools/llama/ 或设置 EDGE_LLAMA_DIR"
             )
 
+        # Architecture-aware flags: qwen4exp needs LLAMA_ATTN_ROT_DISABLE=1 and
+        # (because its thinking mode eats the token budget) --no-reasoning-preserve.
+        self._arch = _read_arch(cfg.model_path)
+        env = os.environ.copy()
+        arch_extra: list = []
+        spec = _ARCH_FLAGS.get(self._arch)
+        if spec:
+            env.update(spec.get("env", {}))
+            arch_extra.extend(spec.get("args", []))
+
         args = [
             exe,
             "-m", cfg.model_path,
@@ -105,13 +174,23 @@ class LlamaBackend:
             args += ["--n-cpu-moe", str(cfg.n_cpu_moe)]
         if cfg.threads:
             args += ["-t", str(cfg.threads)]
+        if cfg.kv_quant:
+            # KV 量化是大上下文的关键（256K × f16 会吃掉数 GB 显存）。
+            args += ["-ctk", cfg.kv_quant, "-ctv", cfg.kv_quant]
 
         # Qwen3-style thinking: off by default (much faster, cleaner answers);
         # `--reasoning-format deepseek` keeps any thoughts out of `content`.
         args += ["--reasoning", "on" if cfg.reasoning else "off",
                  "--reasoning-format", "deepseek"]
+        if not cfg.reasoning:
+            # Keeps the reasoning channel from consuming the whole max_tokens
+            # (observed on qwen4exp: a 24-token budget produced an empty answer).
+            args += ["--no-reasoning-preserve"]
 
-        kwargs = {}
+        args += arch_extra
+        args += list(cfg.extra_args)
+
+        kwargs = {"env": env}
         if os.name == "nt":
             kwargs["creationflags"] = 0x0800_0000  # CREATE_NO_WINDOW
         self._proc = subprocess.Popen(

@@ -833,13 +833,28 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     T_CLOSE = _LT + "/think" + _GT
 
     want_think = bool(getattr(req, "enable_thinking", False))
+    # Context window for the llama.cpp backend. env override lets users trade
+    # RAM/VRAM for long context; default 32K keeps KV cache small.
+    try:
+        ctx_size = int(os.environ.get("EDGE_CTX", "32768") or 32768)
+    except ValueError:
+        ctx_size = 32768
+    ctx_size = max(512, min(ctx_size, 1048576))
+    # KV cache quantisation: essential for very large contexts. 256K × f16 would
+    # eat several GB; q8_0 roughly halves it at negligible quality cost. Only
+    # applied when the window is large, so short chats keep full precision.
+    kv_q = os.environ.get("EDGE_KV_QUANT", "")
+    if not kv_q:
+        kv_q = "q8_0" if ctx_size >= 65536 else ""
     if not _llama.running() or (_llama._cfg and (
-            _llama._cfg.model_path != gguf_path or _llama._cfg.reasoning != want_think)):
+            _llama._cfg.model_path != gguf_path or _llama._cfg.reasoning != want_think
+            or _llama._cfg.kv_quant != kv_q or _llama._cfg.ctx != ctx_size)):
         # NVIDIA → offload everything to CUDA (discrete VRAM). MoE layers can be
         # pushed to CPU/RAM via EDGE_N_CPU_MOE when the model exceeds VRAM.
         n_cpu_moe = int(os.environ.get("EDGE_N_CPU_MOE", "0") or 0)
         _llama.load(LlamaConfig(model_path=gguf_path, port=8081,
-                                n_cpu_moe=n_cpu_moe, reasoning=want_think))
+                                n_cpu_moe=n_cpu_moe, reasoning=want_think,
+                                kv_quant=kv_q, ctx=ctx_size))
 
     msgs = []
     if system:

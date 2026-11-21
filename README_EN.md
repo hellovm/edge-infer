@@ -518,6 +518,8 @@ costs far less than a new NPU backend.
 | `EDGE_ENABLE_THINKING` | `0` | Whether Qwen3 runs in thinking mode |
 | `EDGE_LLAMA_DIR` | `D:\AI\tools\llama` | Directory holding `llama-server.exe` (point it at a Vulkan/ROCm build on AMD) |
 | `EDGE_N_CPU_MOE` | `0` | MoE layers kept on CPU/RAM (3-tier offload knob) |
+| `EDGE_CTX` | `32768` | llama.cpp context window (max 1048576) |
+| `EDGE_KV_QUANT` | auto | KV cache quantisation; `q8_0` auto-applied at ≥64K ctx |
 | `EDGE_LOG_LEVEL` | `INFO` | Log level: `DEBUG` / `INFO` / `WARNING` |
 | `EDGE_DIAG_BOOT` | `0` | `1` = write a diagnostics bundle at startup |
 

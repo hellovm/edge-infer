@@ -481,6 +481,8 @@ ONNX Runtime + VitisAI 栈，与 OpenVINO IR / `LLMPipeline` 零兼容。
 | `EDGE_ENABLE_THINKING` | `0` | Qwen3 是否开启 thinking |
 | `EDGE_LLAMA_DIR` | `D:\AI\tools\llama` | 存放 `llama-server.exe` 的目录（AMD 可指向 Vulkan/ROCm 构建） |
 | `EDGE_N_CPU_MOE` | `0` | 放在 CPU/内存的 MoE 层数（三层卸载开关） |
+| `EDGE_CTX` | `32768` | llama.cpp 上下文窗口（最大 1048576） |
+| `EDGE_KV_QUANT` | 自动 | KV cache 量化；≥64K 上下文时自动用 `q8_0` |
 | `EDGE_LOG_LEVEL` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARNING` |
 | `EDGE_DIAG_BOOT` | `0` | `1` = 启动时自动生成诊断包 |
 

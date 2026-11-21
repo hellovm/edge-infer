@@ -8,6 +8,37 @@
 ## [Unreleased]
 
 ### Added
+- **Qwen3.8-Flash-Next 实测跑通**（`qwen4exp`，180B 存储 / 6B 激活）：
+  在 **8 GB 显存 + 32 GB 内存 + SSD** 上用三层卸载成功加载并推理，
+  66.38 GB 权重（UD-IQ1_S）实测通过。
+  - `--n-cpu-moe 30` 为实测最优点：prefill 15.5 / decode 1.93 tok/s（p512）
+  - **256K 上下文可用**（`n_ctx: 262144` 确认）；2K 提示长文召回测试通过
+  - 详见 `docs/QWEN38_FLASH_NEXT.md`
+- **架构自适应后端**（`llama_backend.py`）：
+  - `_read_arch()` 只读 GGUF 头解析 `general.architecture`，60 GB 文件也是毫秒级
+  - `_ARCH_FLAGS` 表按架构自动注入必需参数 —— `qwen4exp` 自动加
+    `LLAMA_ATTN_ROT_DISABLE=1`（该架构不支持上游 RoPE rotation）
+  - 非思考模式自动加 `--no-reasoning-preserve`：实测发现 qwen4exp 的
+    思考通道会吃光 token 预算（24 token 预算产出空回答）
+  - 新增 `kv_quant` / `ctx` / `extra_args` 配置项
+- **KV cache 量化**：`EDGE_KV_QUANT`（默认按窗口自动决定），
+  `EDGE_CTX` 控制上下文（默认 32K，最大 1M）。
+  大上下文时自动用 `q8_0`，256K KV cache 从 2.67 GB 降到 1.34 GB。
+- 新增 `python/edge_server/tier_plan.py`（三层卸载规划，只读 GGUF 头）
+  与 GUI「设置 → 三层卸载规划」面板。
+- 新增 `docs/QWEN38_FLASH_NEXT.md`：完整方案（规格 / 预算 / 调优 / 实测 / 限制）。
+
+### Fixed
+- **GGUF 类型表缺新增类型**：`Q1_0`(41) / `Q2_0`(42) 未收录导致权重虚高
+  2.9 倍（190.9 GB vs 实际 66.4 GB）；`IQ4_NL` 块大小应为 32 而非 256。
+- **tier_plan 支持分片与未下完的文件**：自动聚合 `-0000N-of-0000M`，
+  `.incomplete` 也能读（header 在文件开头）。
+- **分层决策**：n-gram 表是纯查表，超预算时整表下 SSD 优先于任何专家，
+  不为它分配 VRAM。
+
+## [Unreleased]（上一批）
+
+### Added
 - **三层卸载规划工具** `edge_server/tier_plan.py`：**只读 GGUF 头与张量表**
   （不加载权重），对任意大小模型秒出结论 —— 分组体积（n-gram 表 / MoE 专家 /
   注意力 / 其它）+ 逐组分层建议（VRAM / RAM / SSD）+ 是否需 SSD 参与。
