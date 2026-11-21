@@ -798,22 +798,51 @@ def _resolve_model_dir(model_id: Optional[str]) -> str:
     return cand if os.path.isdir(cand) else DEFAULT_MODEL_DIR
 
 
+_SPLIT_RE = __import__("re").compile(r"^(?P<pre>.+?)-(?P<i>\d{5})-of-(?P<n>\d{5})\.gguf$")
+
+
 def _find_gguf(model_dir: str) -> Optional[str]:
-    """Return the largest *.gguf under model_dir (a GGUF checkpoint), else None."""
-    best, best_sz = None, -1
+    """Return the GGUF checkpoint to hand to llama.cpp, else None.
+
+    For a **split** model (``name-00001-of-00004.gguf`` …) llama.cpp must be
+    given the **first** shard -- it reads the metadata and tensor table there
+    and locates the siblings itself. Returning the largest file would pick
+    shard 2..N and fail with "failed to load GGUF split".
+
+    For a single-file model we keep the old behaviour (largest .gguf), but
+    ignore mmproj sidecars and still-downloading files.
+    """
     if not os.path.isdir(model_dir):
         return None
+
+    splits: dict[str, list[tuple[int, str]]] = {}
+    singles: list[tuple[int, str]] = []
     for root, _dirs, files in os.walk(model_dir):
         for f in files:
-            if f.endswith(".gguf") and "mmproj" not in f.lower():
-                p = os.path.join(root, f)
-                try:
-                    sz = os.path.getsize(p)
-                except OSError:
-                    continue
-                if sz > best_sz:
-                    best, best_sz = p, sz
-    return best
+            low = f.lower()
+            if not low.endswith(".gguf") or "mmproj" in low:
+                continue
+            p = os.path.join(root, f)
+            try:
+                sz = os.path.getsize(p)
+            except OSError:
+                continue
+            m = _SPLIT_RE.match(f)
+            if m:
+                splits.setdefault(m.group("pre") + f"|{m.group('n')}", []).append(
+                    (int(m.group("i")), p))
+            else:
+                singles.append((sz, p))
+
+    if splits:
+        # First shard of the first split set, by shard index.
+        group = next(iter(splits.values()))
+        group.sort(key=lambda t: t[0])
+        return group[0][1]
+
+    if singles:
+        return max(singles)[1]
+    return None
 
 
 def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
