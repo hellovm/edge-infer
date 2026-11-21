@@ -34,7 +34,10 @@ _GGUF_TYPES = {
     8: ("STRING", 0), 9: ("ARRAY", 0), 10: ("U64", 8), 11: ("I64", 8), 12: ("F64", 8),
 }
 
-# ggml block sizes: (block_size, type_size) for the quantized types we may meet
+# ggml block sizes: (block_size, type_size) for the quantized types we may meet.
+# NOTE: llama.cpp keeps adding types; ids >= 41 are recent additions (Q1_0/Q2_0
+# are 1/2-bit "simple block" quants, not K-quants). Unknown ids fall back to
+# 1 element x 4 bytes, which over-estimates -- so keep this table current.
 _GGML_BLOCK = {
     0: (1, 4), 1: (1, 2),      # F32, F16
     2: (32, 18),               # Q4_0
@@ -53,7 +56,7 @@ _GGML_BLOCK = {
     17: (256, 74),             # IQ2_XS
     18: (256, 98),             # IQ3_XXS
     19: (256, 34),             # IQ1_S
-    20: (256, 18),             # IQ4_NL
+    20: (32, 18),              # IQ4_NL  (block 32, not 256)
     21: (256, 110),            # IQ3_S
     22: (256, 82),             # IQ2_S
     23: (256, 136),            # IQ4_XS
@@ -66,6 +69,10 @@ _GGML_BLOCK = {
     30: (1, 2),                # BF16
     34: (256, 54),             # TQ1_0
     35: (256, 66),             # TQ2_0
+    36: (256, 54),             # TQ1_0 (alias seen in some builds)
+    37: (256, 66),             # TQ2_0 (alias)
+    41: (128, 18),             # Q1_0
+    42: (64, 18),              # Q2_0
 }
 
 _TYPE_NAME = {
@@ -73,7 +80,8 @@ _TYPE_NAME = {
     8: "Q8_0", 9: "Q8_1", 10: "Q2_K", 11: "Q3_K", 12: "Q4_K", 13: "Q5_K",
     14: "Q6_K", 15: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS", 18: "IQ3_XXS",
     19: "IQ1_S", 20: "IQ4_NL", 21: "IQ3_S", 22: "IQ2_S", 23: "IQ4_XS",
-    30: "BF16",
+    24: "I8", 25: "I16", 26: "I32", 27: "I64", 28: "F64", 29: "IQ1_M",
+    30: "BF16", 34: "TQ1_0", 35: "TQ2_0", 41: "Q1_0", 42: "Q2_0",
 }
 
 
@@ -139,7 +147,11 @@ class _Reader:
 
 
 def read_gguf(path: str) -> Dict[str, Any]:
-    """Parse header + metadata + tensor table. Returns the tensor list too."""
+    """Parse header + metadata + tensor table. Returns the tensor list too.
+
+    Works on a partially-downloaded file: the header and tensor table live at
+    the start, so even a ``.incomplete`` shard can be inspected mid-download.
+    """
     with open(path, "rb") as f:
         r = _Reader(f)
         magic = f.read(4)
@@ -161,11 +173,14 @@ def read_gguf(path: str) -> Dict[str, Any]:
 
         tensors: List[Dict[str, Any]] = []
         for _ in range(n_tensors):
-            name = r.string()
-            n_dims = r.u32()
-            dims = [r.u64() for _ in range(n_dims)]
-            ttype = r.u32()
-            offset = r.u64()
+            try:
+                name = r.string()
+                n_dims = r.u32()
+                dims = [r.u64() for _ in range(n_dims)]
+                ttype = r.u32()
+                offset = r.u64()
+            except Exception:  # noqa: BLE001
+                break          # truncated download -- keep what we parsed
             n_elem = 1
             for d in dims:
                 n_elem *= d
@@ -176,7 +191,63 @@ def read_gguf(path: str) -> Dict[str, Any]:
                 "type_name": _TYPE_NAME.get(ttype, f"T{ttype}"),
                 "bytes": nbytes,
             })
-        return {"version": version, "meta": meta, "tensors": tensors}
+        return {"version": version, "meta": meta, "tensors": tensors,
+                "n_tensors_declared": n_tensors}
+
+
+_SPLIT_RE = __import__("re").compile(r"^(?P<pre>.+?)-(?P<i>\d{5})-of-(?P<n>\d{5})\.gguf")
+
+
+def find_shards(path: str) -> List[str]:
+    """Return every shard of a split GGUF, including still-downloading ones.
+
+    ``…-00002-of-00003.gguf.incomplete`` counts, so a plan can be produced
+    while the download is still running.
+    """
+    d = os.path.dirname(path) or "."
+    b = os.path.basename(path)
+    m = _SPLIT_RE.match(b)
+    if not m:
+        return [path]
+    total = int(m.group("n"))
+    pre = m.group("pre")
+    out: List[str] = []
+    for i in range(1, total + 1):
+        for cand in (f"{pre}-{i:05d}-of-{total:05d}.gguf",
+                     f"{pre}-{i:05d}-of-{total:05d}.gguf.incomplete"):
+            p = os.path.join(d, cand)
+            if os.path.isfile(p):
+                out.append(p)
+                break
+    return out or [path]
+
+
+def read_model(path: str) -> Dict[str, Any]:
+    """Read a (possibly split, possibly incomplete) model as one unit."""
+    shards = find_shards(path)
+    metas: Dict[str, Any] = {}
+    tensors: List[Dict[str, Any]] = []
+    version = 0
+    declared = 0
+    partial = []
+    for s in shards:
+        try:
+            info = read_gguf(s)
+        except Exception as e:  # noqa: BLE001
+            partial.append(f"{os.path.basename(s)}: {e}")
+            continue
+        version = info["version"]
+        declared += info["n_tensors_declared"]
+        for k, v in info["meta"].items():
+            metas.setdefault(k, v)      # shard 1 carries the real metadata
+        tensors.extend(info["tensors"])
+        if s.endswith(".incomplete"):
+            partial.append(os.path.basename(s))
+    return {
+        "version": version, "meta": metas, "tensors": tensors,
+        "n_shards": len(shards), "n_tensors_declared": declared,
+        "partial": partial,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -223,49 +294,102 @@ def classify(tensors: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     return groups
 
 
+def decide_tiers(groups: Dict[str, Dict[str, Any]], vram: float,
+                 ram: float) -> Tuple[Dict[str, str], Dict[str, Any]]:
+    """Decide which group goes where.
+
+    Priority reasoning:
+
+    * ``attention`` / ``other`` are small and touched **every token** -- they
+      must be resident (VRAM, else RAM).
+    * ``experts`` are huge but only ~2% are read per token, so RAM is fine.
+    * ``ngram_table`` is a **pure lookup** (16 rows/token, a few KB): it is the
+      single best thing to park on SSD, and the only group whose cost on SSD is
+      a page read rather than a matmul.
+
+    So when the model does not fit in VRAM+RAM, the n-gram table is evicted to
+    SSD *first*, before any expert.
+    """
+    tiers: Dict[str, str] = {}
+    v_left, r_left = vram, ram
+    detail: Dict[str, Dict[str, float]] = {}
+
+    def place(k: str) -> None:
+        """Fill VRAM first, then RAM, spill the remainder to SSD."""
+        nonlocal v_left, r_left
+        b = groups[k]["bytes"]
+        into_v = min(b, v_left)
+        rest = b - into_v
+        into_r = min(rest, r_left)
+        to_ssd = rest - into_r
+        v_left -= into_v
+        r_left -= into_r
+        detail[k] = {"vram": into_v, "ram": into_r, "ssd": to_ssd}
+        if to_ssd > 0:
+            tiers[k] = "SSD" if (into_v + into_r) == 0 else "RAM+SSD"
+        elif into_r > 0:
+            tiers[k] = "RAM"
+        else:
+            tiers[k] = "VRAM"
+
+    # 1) always-resident groups (small, touched every token)
+    for k in ("attention", "other"):
+        if groups[k]["bytes"]:
+            place(k)
+
+    # 2) the big two. The n-gram table is a pure lookup, so it is the cheapest
+    #    thing to park on SSD -- evict it there before spilling any expert.
+    ng_b = groups["ngram_table"]["bytes"]
+    ex_b = groups["experts"]["bytes"]
+    if (ng_b + ex_b) <= (v_left + r_left):
+        # everything fits in VRAM+RAM, no SSD needed
+        place("experts")
+        place("ngram_table")
+    else:
+        # Over budget: the n-gram table goes **entirely** to SSD. It is a pure
+        # lookup, so residency buys almost nothing, whereas the experts are
+        # matmul'd and benefit from fast memory. Giving the leftover VRAM to
+        # experts is strictly better than splitting it with the table.
+        detail["ngram_table"] = {"vram": 0.0, "ram": 0.0, "ssd": ng_b}
+        tiers["ngram_table"] = "SSD"
+        place("experts")
+
+    total = sum(g["bytes"] for g in groups.values())
+    info = {
+        "total_bytes": total,
+        "fits_vram_ram": sum(d["ssd"] for d in detail.values()) == 0,
+        "vram_used": sum(d["vram"] for d in detail.values()),
+        "ram_used": sum(d["ram"] for d in detail.values()),
+        "ssd_used": sum(d["ssd"] for d in detail.values()),
+        "tier_detail": detail,
+    }
+    return tiers, info
+
+
 def plan(path: str, vram_gb: float, ram_gb: float) -> Dict[str, Any]:
-    info = read_gguf(path)
+    """Analyse a GGUF (split / partial ok) and recommend a tier split."""
+    info = read_model(path)
     meta, tensors = info["meta"], info["tensors"]
     groups = classify(tensors)
 
-    arch = meta.get("general.architecture", "?")
-    total = sum(g["bytes"] for g in groups.values())
     vram = vram_gb * 1e9
     ram = ram_gb * 1e9
+    tiers, summary = decide_tiers(groups, vram, ram)
 
-    # Order matters: n-gram table is the best candidate for slow tiers, then
-    # experts, because a token touches almost none of either per step.
-    order = ["ngram_table", "experts", "other", "attention"]
-    remaining_vram, remaining_ram = vram, ram
-    tiers: Dict[str, str] = {}
-    for k in order:
-        b = groups[k]["bytes"]
-        if b == 0:
-            continue
-        if b <= remaining_vram:
-            tiers[k] = "VRAM"
-            remaining_vram -= b
-        elif b <= remaining_ram:
-            tiers[k] = "RAM"
-            remaining_ram -= b
-        else:
-            tiers[k] = "SSD"
-    # attention never goes to SSD if we can help it
-    if tiers.get("attention") == "SSD" and groups["attention"]["bytes"] <= vram:
-        tiers["attention"] = "VRAM"
-
-    fit = total <= (vram + ram)
     return {
         "path": path,
-        "arch": arch,
+        "arch": meta.get("general.architecture", "?"),
+        "name": meta.get("general.name", ""),
         "version": info["version"],
         "n_tensors": len(tensors),
-        "total_bytes": total,
-        "groups": groups,
-        "tiers": tiers,
-        "fit_in_vram_ram": fit,
+        "n_tensors_declared": info.get("n_tensors_declared", len(tensors)),
+        "n_shards": info.get("n_shards", 1),
+        "partial": info.get("partial", []),
         "vram_gb": vram_gb,
         "ram_gb": ram_gb,
+        "groups": groups,
+        "tiers": tiers,
+        **summary,
         "meta": {k: v for k, v in meta.items()
                  if any(s in k for s in ("arch", "block_count", "context_length",
                                          "expert", "embedding_length", "name"))},
@@ -278,7 +402,12 @@ def render(p: Dict[str, Any]) -> str:
     L.append("=" * 74)
     L.append(f"三层卸载规划  ·  {os.path.basename(p['path'])}")
     L.append("=" * 74)
-    L.append(f"架构        : {p['arch']}  (GGUF v{p['version']}, {p['n_tensors']} tensors)")
+    L.append(f"架构        : {p['arch']}  (GGUF v{p['version']}, "
+             f"{p['n_tensors']} tensors"
+             + (f" / {p['n_shards']} shards" if p.get("n_shards", 1) > 1 else "")
+             + ")")
+    if p.get("partial"):
+        L.append(f"⚠ 下载未完成 : {len(p['partial'])} 个分片仍在下载中")
     for k, v in (p["meta"] or {}).items():
         if k.startswith("general."):
             continue
@@ -294,18 +423,31 @@ def render(p: Dict[str, Any]) -> str:
         L.append(f"  {k:14} {v['bytes']/1e9:8.2f} GB   {v['count']:5} tensors   {v['note']}")
     L.append("")
     L.append(f"--- 分层建议 (VRAM {p['vram_gb']:.0f} GB + RAM {p['ram_gb']:.0f} GB) ---")
+    det = p.get("tier_detail") or {}
     for k in ("attention", "other", "experts", "ngram_table"):
-        if k in p["tiers"]:
-            L.append(f"  {k:14} -> {p['tiers'][k]}")
+        if k not in p["tiers"]:
+            continue
+        d = det.get(k)
+        extra = ""
+        if d:
+            parts = []
+            for t, short in (("vram", "VRAM"), ("ram", "RAM"), ("ssd", "SSD")):
+                if d.get(t):
+                    parts.append(f"{short} {d[t]/1e9:.2f} GB")
+            extra = "   [" + " + ".join(parts) + "]"
+        L.append(f"  {k:14} -> {p['tiers'][k]:8}{extra}")
     L.append("")
-    if p["fit_in_vram_ram"]:
+    L.append(f"合计: VRAM {p.get('vram_used',0)/1e9:.2f} / "
+             f"RAM {p.get('ram_used',0)/1e9:.2f} / "
+             f"SSD {p.get('ssd_used',0)/1e9:.2f} GB")
+    L.append("")
+    if p["fits_vram_ram"]:
         L.append("  ✓ 权重可完全放进 VRAM + RAM")
         L.append("    建议: -ngl 999  -ncmoe <放入RAM的专家层数>")
     else:
-        short = p["total_bytes"] - (p["vram_gb"] + p["ram_gb"]) * 1e9
-        L.append(f"  ⚠ 权重超出 VRAM+RAM {short/1e9:.1f} GB —— 需要 SSD 参与")
+        L.append("  ⚠ 权重超出 VRAM+RAM —— 需要 SSD 参与")
         L.append("    建议: mmap 默认开启 + --n-cpu-moe 增大 + --lazy-mode on")
-        L.append("          n-gram 表留在 SSD 上异步预取（查表不是矩阵乘）")
+        L.append("          n-gram 表留在 SSD 上按需读取（查表非矩阵乘，每 token 只读 16 行）")
     return "\n".join(L) + "\n"
 
 
