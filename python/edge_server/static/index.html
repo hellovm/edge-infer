@@ -858,6 +858,17 @@ const PANELS={
         <div id="diagOut" class="mono" style="margin-top:10px;font-size:12px;white-space:pre-wrap;color:var(--dim);max-height:280px;overflow:auto"></div>
         <div id="probOut" style="display:none;margin-top:10px;max-height:260px;overflow:auto"></div>
       </div>
+      <div class="sec"><h3>三层卸载规划</h3>
+        <div class="desc">选一个 <b>GGUF</b> 模型，算出它在「显存 / 内存 / SSD」三层里怎么放 ——
+          只读文件头与张量表，不加载权重，60 GB+ 的模型也能秒出结论。</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
+          <select id="tierModel" class="btn" style="min-width:230px"></select>
+          <input id="tierVram" type="number" value="8" min="1" max="256" step="1" class="btn" style="width:70px" title="显存 GB">
+          <input id="tierRam" type="number" value="32" min="1" max="1024" step="1" class="btn" style="width:70px" title="内存 GB">
+          <button class="btn" onclick="runTierPlan()">规划</button>
+        </div>
+        <div id="tierOut" class="mono" style="margin-top:10px;font-size:12px;white-space:pre-wrap;color:var(--dim);max-height:320px;overflow:auto"></div>
+      </div>
       <div class="sec"><h3>关于</h3>
         <div class="desc">edge-infer · 三层卸载多硬件推理平台 v0.2.1<br>
         Rust 内核（edge-detect / edge-tiers / edge-prefetch / edge-engine）+ OpenVINO 推理服务。</div>
@@ -1053,6 +1064,7 @@ function initSettings(){
   renderDevGrid();
   loadDiagnostics();
   refreshProblemCount();
+  loadTierModels();
 }
 
 // ---- 环境诊断 / 问题记录 ----
@@ -1132,6 +1144,78 @@ async function exportDiagBundle(){
       if(out) out.textContent="诊断包已生成：\n"+j.path+"\n\n在「模型/日志」目录下的 logs/diagnostics/ 中，回传此文件即可排查。";
     }else{ toast("生成失败"); }
   }catch(e){ toast("生成失败："+e.message); }
+}
+
+// ---- 三层卸载规划 ----
+async function loadTierModels(){
+  const sel=$("tierModel"); if(!sel) return;
+  try{
+    const j=await (await fetch(API+"/edge/models")).json();
+    const list=(j.models||[]).filter(m=>m.kind==="gguf"||/gguf/i.test(m.name||""));
+    sel.innerHTML="";
+    if(!list.length){ sel.innerHTML='<option value="">（未发现 GGUF 模型）</option>'; return; }
+    list.forEach(m=>{
+      const o=document.createElement("option");
+      o.value=m.name; o.textContent=`${m.name}  (${m.size_gb??"?"} GB)`;
+      sel.appendChild(o);
+    });
+  }catch(e){
+    $("tierModel").innerHTML='<option value="">加载失败</option>';
+  }
+}
+async function runTierPlan(){
+  const out=$("tierOut"); if(!out) return;
+  const model=$("tierModel").value;
+  if(!model){ out.textContent="请先选择一个 GGUF 模型。"; return; }
+  const vram=$("tierVram").value||8, ram=$("tierRam").value||32;
+  out.textContent="正在读取模型头…";
+  try{
+    const url=`${API}/edge/tier_plan?model=${encodeURIComponent(model)}&vram=${vram}&ram=${ram}`;
+    const r=await fetch(url);
+    const j=await r.json();
+    if(!j.ok){ out.textContent="规划失败："+(j.detail||"未知错误"); return; }
+    out.textContent=renderTierPlan(j.plan);
+  }catch(e){ out.textContent="规划失败："+e.message; }
+}
+function renderTierPlan(p){
+  const g=p.groups||{}, d=p.tier_detail||{};
+  const gb=b=>(b/1e9).toFixed(2)+" GB";
+  const L=[];
+  L.push(`架构      ${p.arch}  (GGUF v${p.version}, ${p.n_tensors} tensors`
+         + (p.n_shards>1?` / ${p.n_shards} shards`:"") + ")");
+  if(p.name) L.push(`名称      ${p.name}`);
+  if((p.partial||[]).length) L.push(`⚠ 下载未完成：${p.partial.length} 个分片仍在下载`);
+  L.push("");
+  L.push(`权重总计  ${gb(p.total_bytes)}`);
+  L.push("");
+  L.push("分组：");
+  [["ngram_table","n-gram 表"],["experts","MoE 专家"],["attention","注意力"],["other","其它"]]
+    .forEach(([k,label])=>{
+      if(g[k]&&g[k].count) L.push(`  ${label.padEnd(12)} ${gb(g[k].bytes).padStart(12)}   ${g[k].count} tensors`);
+    });
+  L.push("");
+  L.push(`分层建议（VRAM ${p.vram_gb} / RAM ${p.ram_gb} GB）：`);
+  [["attention","注意力"],["other","其它"],["experts","MoE 专家"],["ngram_table","n-gram 表"]]
+    .forEach(([k,label])=>{
+      if(!p.tiers[k]) return;
+      const dd=d[k]||{}, parts=[];
+      if(dd.vram) parts.push(`VRAM ${gb(dd.vram)}`);
+      if(dd.ram)  parts.push(`RAM ${gb(dd.ram)}`);
+      if(dd.ssd)  parts.push(`SSD ${gb(dd.ssd)}`);
+      L.push(`  ${label.padEnd(12)} → ${p.tiers[k].padEnd(8)} ${parts.length?"["+parts.join(" + ")+"]":""}`);
+    });
+  L.push("");
+  L.push(`合计  VRAM ${gb(p.vram_used||0)} / RAM ${gb(p.ram_used||0)} / SSD ${gb(p.ssd_used||0)}`);
+  L.push("");
+  if(p.fits_vram_ram){
+    L.push("✓ 权重可完全放进 VRAM + RAM");
+    L.push("  建议：-ngl 999  -ncmoe <放入 RAM 的专家层数>");
+  }else{
+    L.push("⚠ 权重超出 VRAM+RAM，需要 SSD 参与");
+    L.push("  建议：mmap 默认开 + --n-cpu-moe 增大 + --lazy-mode on");
+    L.push("        n-gram 表留 SSD 按需读（查表非矩阵乘，每 token 只读 16 行）");
+  }
+  return L.join("\n");
 }
 async function renderDevGrid(){
   let npu=false, devs=[];

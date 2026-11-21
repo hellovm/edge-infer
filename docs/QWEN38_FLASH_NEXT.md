@@ -209,23 +209,52 @@ cd python
 python -m edge_server.tier_plan <model.gguf> --vram 8 --ram 32
 ```
 
-输出示例（80B 模型）：
+### 6.1 本模型实测输出
 
 ```
-架构        : qwen3next  (GGUF v3, 843 tensors)
-权重总计    : 48.48 GB
+架构        : qwen4exp  (GGUF v3, 1224 tensors / 3 shards)
+  qwen4exp.block_count                        = 48
+  qwen4exp.context_length                     = 262144
+  qwen4exp.expert_count                       = 512
+  qwen4exp.expert_used_count                  = 10
+  qwen4exp.embedding_length_per_layer_input   = 160
+
+权重总计    : 66.37 GB          ← 与实际文件 66.38 GB 吻合
+
 --- 分组 ---
-  experts           46.81 GB     144 tensors   MoE 专家，可按热度分层
-  attention          0.77 GB     240 tensors   注意力，常驻快层
-  other              0.90 GB     459 tensors   embedding / norm / 输出层
+  ngram_table       28.80 GB       1 tensors   查表用，可放 RAM/SSD
+  experts           33.40 GB     144 tensors   MoE 专家，可按热度分层
+  attention          1.94 GB     336 tensors   注意力，常驻快层
+  other              2.23 GB     743 tensors   embedding / norm / 输出层
+
 --- 分层建议 (VRAM 8 GB + RAM 32 GB) ---
-  attention      -> VRAM
-  other          -> VRAM
-  experts        -> SSD
-  ⚠ 权重超出 VRAM+RAM 8.5 GB —— 需要 SSD 参与
+  attention      -> VRAM       [VRAM 1.94 GB]
+  other          -> VRAM       [VRAM 2.23 GB]
+  experts        -> RAM        [VRAM 3.83 GB + RAM 29.57 GB]
+  ngram_table    -> SSD        [SSD 28.80 GB]
+
+合计: VRAM 8.00 / RAM 29.57 / SSD 28.80 GB
 ```
+
+### 6.2 关键点
+
+- **支持分片与未下完的文件**：自动聚合 `-0000N-of-0000M` 全部分片；
+  header 在文件开头，所以 `.incomplete` 也能读（下载途中即可规划）。
+- **分层决策逻辑**：n-gram 表是**纯查表**（非矩阵乘），
+  超预算时**整表下 SSD 优先于任何专家** —— 它常驻快层几乎无收益，
+  而专家是矩阵乘、受益于快内存。
+- 权重算术已用 80B / Flash-Next 两个模型交叉校验。
 
 HTTP 端点：`GET /edge/tier_plan?model=<dir>&vram=8&ram=32`
+GUI：「设置 → 三层卸载规划」
+
+### 6.3 踩坑记录
+
+实现时踩到一个真坑：**GGUF 类型表需要跟上 llama.cpp 的新增类型**。
+`Q1_0`(41) / `Q2_0`(42) 是较新的 1/2-bit simple-block 类型
+（Q2_0 = 64 值/块 18 字节 = 2.25 bpw），表里缺失会按默认 4 字节计算，
+导致总权重虚高到 **190.9 GB**（实际 66.4 GB，差 2.9 倍）。
+另外 `IQ4_NL` 的块大小是 **32** 而非 256，也需修正。
 
 ---
 
