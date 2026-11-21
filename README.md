@@ -38,7 +38,7 @@
   关键结论：**OpenVINO 的 GPU 插件面向 Intel 优化，把 N 卡交给它等于浪费约 19 倍性能**
   （实测 decode 2.3 vs 43.3 tok/s）。因此 N 卡一律走 llama.cpp CUDA，
   Intel GPU / NPU 走 OpenVINO。
-  **超大 MoE（80B-A3B）在 8 GB 显存上靠 `--n-cpu-moe` 三层卸载也能跑：N 卡 decode 9.5 tok/s。**
+  **超大 MoE（Qwen3.8-Flash-Next，180B 存储）在 8 GB 显存上靠 `--n-cpu-moe` 三层卸载也能跑：N 卡 decode 3.6 tok/s。**
   （完整的 prefill / decode、CPU 与 Vulkan 对照、`ncmoe` 扫描与测试条件见
   [性能实测](#-性能实测)。）
 
@@ -51,7 +51,7 @@
   `tokenizers` + `numpy`，绕开版本地狱（VLM 路径）。
 - **OpenVINO GenAI 后端** — `LLMPipeline` 驱动 NPU / Intel GPU / CPU，支持 **SSE 流式输出**。
 - **llama.cpp 后端** — 运行 GGUF 模型（NVIDIA CUDA 路径），覆盖 OpenVINO IR
-  无法承载的更大 MoE（80B-A3B 及以上）；用 `--n-cpu-moe` 把 MoE 层放到
+  无法承载的更大 MoE（如 Qwen3.8-Flash-Next，180B 存储）；用 `--n-cpu-moe` 把 MoE 层放到
   CPU/内存实现三层卸载。
 - **量化说明** — FP4/NVFP4 需 Blackwell（RTX 50 系，sm120）的 FP4 张量核；
   **RTX 40 系（Ada，sm89）没有 FP4 通路**，NVFP4 会退化为软件模拟（可能更慢）。
@@ -129,31 +129,31 @@ decode = 稳态生成。
 
 ### 超大 MoE 三层卸载（重点）
 
-**80B 模型在 8 GB 显存 + 32 GB 内存上跑起来** —— 这是本项目的核心场景。
-模型 `Qwen3-Next-80B-A3B`（48.5 GB，总参 80B / 激活 3B），用
-`--n-cpu-moe` 把 MoE 层放 CPU/内存、注意力与 dense 层留显存：
+**Qwen3.8-Flash-Next（180B 存储 / 6B 激活，66.4 GB）在 8 GB 显存 + 32 GB 内存上跑起来** ——
+这是本项目的核心场景。`--n-cpu-moe` 把 MoE 专家放 CPU/内存、注意力与 dense 层留显存，
+28.8 GB 的 n-gram 表靠 `--lazy-mode` 留在 SSD：
 
 | 后端 · 设备 | 卸载配置 | Prefill tok/s | Decode tok/s | 备注 |
 |---|---|---|---|---|
-| llama.cpp CUDA · RTX 4070 8 GB | `ncmoe=48` | **34.2** | **9.5** | 最优；约 48/64 层 MoE 落在内存 |
-| llama.cpp Vulkan · Intel Arc | `ncmoe=48` | 6.4 | 3.9 | 共享内存上限 15.5 GB |
-| ~~llama.cpp CUDA · `ngl=999` 全量卸载~~ | — | — | — | ❌ 直接 OOM（需 46 GB 显存） |
+| llama.cpp CUDA · RTX 4070 8 GB | `ncmoe=30` | **16.9** | **3.6** | ✅ 稳定最优点 |
+| ~~llama.cpp CUDA · `ncmoe=20`~~ | — | — | — | ❌ OOM（显存不足） |
 
-`--n-cpu-moe` 扫描结果（N 卡，`-p 128 -n 64`）：
+`--n-cpu-moe` 扫描结果（N 卡，`-p 512 -n 128`，重复 2–3 次）：
 
-| ncmoe | Prefill tok/s | Decode tok/s |
-|---|---|---|
-| 30 | 4.3 | 3.0 |
-| 40 | 3.6 | 3.6 |
-| 44 | 9.8 | 3.9 |
-| **48** | **10.8** | **7.3** ← 最优 |
-| 52 | 12.6 | 7.0 |
-| 56 | 15.2 | 6.2 |
-| 60 | 13.3 | 4.7 |
+| ncmoe | Prefill tok/s | Decode tok/s | 可信度 |
+|---|---|---|---|
+| 24 | 16.9 | 3.2 | ✅ |
+| **30** | **16.9** | **3.6** | ✅ 最优 |
+| 36 | 13.4 | 4.0 | ✅ |
+| 38 | 13.8 | 2.9 | ✅ |
+| 40 | 13.0 | 2.1 | ⚠️ 抖动 |
+| 44 | 46.0 ±10 | 3.5 | ⚠️ pp 虚高抖动 |
+| 48 | 43.5 ±13 | 3.2 | ⚠️ 抖动 |
 
-> 卸载越多，显存压力越小但 CPU 侧带宽成为瓶颈 —— 48 层附近是
-> 「显存装得下的层都装下、剩下的丢内存」的平衡点。**8B → 80B 参数量涨 10×，
-> decode 只从 43.3 掉到 9.5 tok/s（约 4.6×）**，这正是 MoE + 三层卸载的价值。
+> 卸载越多显存压力越小，但 **ncmoe≥40 时 CPU 侧专家需约 30 GB**，
+> 超过本机空闲内存（~21 GB）触发换页 —— decode 在 2–5 tok/s 间剧烈抖动、不可复现。
+> **ncmoe=30 是稳定平衡点。** 完整分析（含「省电模式」复测）见
+> [Qwen3.8-Flash-Next 方案](docs/QWEN38_FLASH_NEXT.md)。
 
 ### 怎么读这组数
 
@@ -161,12 +161,14 @@ decode = 稳态生成。
   交给 OpenVINO（GPU.1）decode 慢 **18.8×**、prefill 慢 **91×** ——
   OpenVINO 的 GPU 插件是为 Intel 芯片打造的。
 - **Intel Arc 核显是非 N 卡里的最强选项** —— prefill 只比 4070 慢 1.8×，
-  而且它共享系统内存，能承载超出独显预算的模型（80B 也能跑，靠 Vulkan + 三层卸载）。
+  而且它共享系统内存，能承载超出独显预算的模型（30B/35B MoE 靠 Vulkan + 三层卸载）。
 - **Intel NPU（Core Ultra 7 155H 上的 AI Boost）面向常驻低功耗**，不是吞吐：
   6.4 tok/s，但功耗只有零头。它没有独立显存，因此走 SSD + 内存两层分片。
 - **核显/Vulkan 路径的取舍**：I 卡跑 8B 时 Vulkan（140/9.2）**慢于** OpenVINO
-  （1298/12.0）——OpenVINO 是 Intel 的原生优化路径；但 80B 没有 OpenVINO IR 版，
-  此时 Vulkan + `--n-cpu-moe` 是唯一可行解。
+  （1298/12.0）——OpenVINO 是 Intel 的原生优化路径；30B/35B MoE 无 IR 版时，
+  Vulkan + `--n-cpu-moe` 是可行解。
+- **Qwen3.8-Flash-Next 仅 N 卡可行**：66.4 GB 权重、无 OpenVINO IR 版，
+  I 卡 / NPU 路径均不可行，详见 [方案文档](docs/QWEN38_FLASH_NEXT.md)。
 
 ---
 
@@ -181,12 +183,12 @@ decode = 稳态生成。
 |---|---|---|---|---|
 | **Qwen3.6-35B-A3B** | 35B-A3B · 多模态 | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 21.2 / 19.4 GB | SSD + 内存 + 显存 |
 | **Qwen3-30B-A3B** | 30B-A3B | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 18.6 / 16.3 GB | SSD + 内存 + 显存 |
-| **Qwen3-Next-80B-A3B** | 80B-A3B | llama.cpp CUDA · GGUF | 48.5 GB | SSD + 内存 + 显存 |
+| **Qwen3.8-Flash-Next** | 180B 存储 / 6B 激活 | llama.cpp CUDA · GGUF（UD-IQ1_S） | 66.4 GB | SSD + 内存 + 显存 |
 | **Qwen3-8B** | 8B | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 5.0 / 4.75 GB | SSD + 内存（+ 显存） |
 | **MiniCPM-V-4.5** | 9B · 多模态 | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 6.0 / 5.26 GB | SSD + 内存（+ 显存） |
 
 - **N 卡**：一律走 **llama.cpp CUDA**（8B 实测 43.3 tok/s；交给 OpenVINO 只有 2.3）。
-  从 35B-A3B 到 80B-A3B —— 8 GB 显存也能跑，靠三层卸载。
+  从 35B-A3B 到 180B 存储的 Flash-Next —— 8 GB 显存也能跑，靠三层卸载。
 - **i 卡**：走 **OpenVINO**（Arc 上比 Vulkan 快约 1.8×），30B / 35B MoE 均可卸载。
 - **NPU**：本身就用系统内存（无独立显存层），因此走 **SSD + 内存两层分片**；
   已实测 9B 多模态（MiniCPM-V-4.5，对称 INT4），30B 级 MoE 验证进行中。
@@ -544,10 +546,10 @@ cargo test                          # Rust 内核单测
 python scripts/bench_llama.py models/qwen3-8b-gguf/Qwen3-8B-Q4_K_M.gguf --ngl 999
 python scripts/bench_ov.py models/qwen3-8b-int4-cw-ov NPU
 
-# 80B 三层卸载
-EDGE_LLAMA_DIR=D:/AI/tools/llama D:/AI/tools/llama/llama-bench.exe \
-  -m models/qwen3-next-80b-a3b-instruct-gguf/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf \
-  -ngl 999 -ncmoe 48 -p 512 -n 128 -r 2
+# Qwen3.8-Flash-Next 三层卸载（需 LLAMA_ATTN_ROT_DISABLE=1）
+LLAMA_ATTN_ROT_DISABLE=1 EDGE_LLAMA_DIR=D:/AI/tools/llama D:/AI/tools/llama/llama-bench.exe \
+  -m models/qwen3.8-flash-next-gguf/UD-IQ1_S/Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
+  -ngl 999 -ncmoe 30 -p 512 -n 128 -r 2
 ```
 
 ---

@@ -42,8 +42,8 @@ touch the filesystem, scaffold projects and run commands.
   Conclusion: **OpenVINO's GPU plugin is tuned for Intel; handing it an NVIDIA
   card wastes roughly 19× the throughput** (measured decode 2.3 vs 43.3 tok/s).
   So NVIDIA always goes through llama.cpp CUDA, while Intel GPU / NPU go through
-  OpenVINO. Large MoE (80B-A3B) still runs on 8 GB VRAM via `--n-cpu-moe`
-  3-tier offloading — **9.5 tok/s decode on NVIDIA**.
+  OpenVINO. Large MoE (Qwen3.8-Flash-Next, 180B stored) still runs on 8 GB VRAM
+  via `--n-cpu-moe` 3-tier offloading — **3.6 tok/s decode on NVIDIA**.
   (Full prefill/decode, CPU & Vulkan references, the `ncmoe` sweep and test
   conditions are in [Performance](#-performance).)
 
@@ -58,8 +58,8 @@ touch the filesystem, scaffold projects and run commands.
 - **OpenVINO GenAI backend** — `LLMPipeline` drives NPU / Intel GPU / CPU, with
   **SSE streaming**.
 - **llama.cpp backend** — runs GGUF models (NVIDIA CUDA path) and covers MoE
-  far beyond what OpenVINO IR can hold (80B-A3B and up); `--n-cpu-moe` keeps
-  MoE layers on CPU/RAM for 3-tier offloading.
+  far beyond what OpenVINO IR can hold (e.g. Qwen3.8-Flash-Next, 180B stored);
+  `--n-cpu-moe` keeps MoE layers on CPU/RAM for 3-tier offloading.
 - **Quantization notes** — FP4/NVFP4 needs Blackwell (RTX 50, sm120) FP4 tensor
   cores; **RTX 40 (Ada, sm89) has no FP4 datapath**, so NVFP4 degrades to
   software emulation (often slower). For Ada, the right choices are **FP8**
@@ -144,34 +144,33 @@ decode = steady-state generation.
 
 ### Large MoE 3-tier offloading (the headline)
 
-**An 80B model runs on 8 GB VRAM + 32 GB RAM** — this is the project's core
-scenario. `Qwen3-Next-80B-A3B` (48.5 GB, 80B total / 3B active) uses
-`--n-cpu-moe` to keep MoE layers on CPU/RAM while attention and dense layers
-stay in VRAM:
+**Qwen3.8-Flash-Next (180B stored / 6B active, 66.4 GB) runs on 8 GB VRAM +
+32 GB RAM** — this is the project's core scenario. `--n-cpu-moe` keeps MoE
+experts on CPU/RAM while attention and dense layers stay in VRAM; the 28.8 GB
+n-gram table stays on SSD via `--lazy-mode`:
 
 | Backend · Device | Offload config | Prefill tok/s | Decode tok/s | Notes |
 |---|---|---|---|---|
-| llama.cpp CUDA · RTX 4070 8 GB | `ncmoe=48` | **34.2** | **9.5** | best; ~48/64 MoE layers in RAM |
-| llama.cpp Vulkan · Intel Arc | `ncmoe=48` | 6.4 | 3.9 | 15.5 GB shared-memory ceiling |
-| ~~llama.cpp CUDA · `ngl=999` full offload~~ | — | — | — | ❌ immediate OOM (needs 46 GB VRAM) |
+| llama.cpp CUDA · RTX 4070 8 GB | `ncmoe=30` | **16.9** | **3.6** | ✅ stable sweet spot |
+| ~~llama.cpp CUDA · `ncmoe=20`~~ | — | — | — | ❌ OOM (not enough VRAM) |
 
-`--n-cpu-moe` sweep (NVIDIA, `-p 128 -n 64`):
+`--n-cpu-moe` sweep (NVIDIA, `-p 512 -n 128`, 2–3 repeats):
 
-| ncmoe | Prefill tok/s | Decode tok/s |
-|---|---|---|
-| 30 | 4.3 | 3.0 |
-| 40 | 3.6 | 3.6 |
-| 44 | 9.8 | 3.9 |
-| **48** | **10.8** | **7.3** ← best |
-| 52 | 12.6 | 7.0 |
-| 56 | 15.2 | 6.2 |
-| 60 | 13.3 | 4.7 |
+| ncmoe | Prefill tok/s | Decode tok/s | Reliable |
+|---|---|---|---|
+| 24 | 16.9 | 3.2 | ✅ |
+| **30** | **16.9** | **3.6** | ✅ best |
+| 36 | 13.4 | 4.0 | ✅ |
+| 38 | 13.8 | 2.9 | ✅ |
+| 40 | 13.0 | 2.1 | ⚠️ jitter |
+| 44 | 46.0 ±10 | 3.5 | ⚠️ inflated pp, jitter |
+| 48 | 43.5 ±13 | 3.2 | ⚠️ jitter |
 
-> More offload means less VRAM pressure but the CPU-side bandwidth becomes the
-> bottleneck — around 48 layers is the sweet spot ("fit every layer that fits in
-> VRAM, spill the rest to RAM"). **Going 8B → 80B is 10× the parameters, yet
-> decode only drops from 43.3 to 9.5 tok/s (~4.6×)** — that is exactly the value
-> of MoE plus 3-tier offloading.
+> More offload means less VRAM pressure, but **at ncmoe≥40 the CPU-side experts
+> need ~30 GB**, exceeding this machine's free RAM (~21 GB) and triggering
+> paging — decode swings wildly between 2–5 tok/s and is not reproducible.
+> **ncmoe=30 is the stable sweet spot.** Full analysis (incl. the "power-saving
+> mode" retest) is in [the Qwen3.8-Flash-Next plan](docs/QWEN38_FLASH_NEXT.md).
 
 ### Reading the numbers
 
@@ -180,14 +179,15 @@ stay in VRAM:
   **91×** on prefill — OpenVINO's GPU plugin is built for Intel silicon.
 - **Intel Arc iGPU is the strongest non-NVIDIA option** — prefill is within 1.8×
   of the 4070, and it shares system RAM, so it can host models larger than its
-  dedicated budget (80B runs too, via Vulkan + 3-tier offloading).
+  dedicated budget (30B/35B MoE via Vulkan + 3-tier offloading).
 - **Intel NPU (AI Boost on Core Ultra 7 155H) is for always-on, low-power
   inference**, not throughput: 6.4 tok/s at a fraction of the power. It has no
   dedicated VRAM, so it uses a SSD + RAM two-tier split.
 - **iGPU/Vulkan trade-off**: for 8B on the Arc iGPU, Vulkan (140/9.2) is
   **slower** than OpenVINO (1298/12.0) — OpenVINO is Intel's native optimized
-  path. But no OpenVINO IR exists for 80B, so Vulkan + `--n-cpu-moe` is the only
-  way to run it there.
+  path; for 30B/35B MoE with no IR build, Vulkan + `--n-cpu-moe` works.
+- **Qwen3.8-Flash-Next is NVIDIA-only**: 66.4 GB weights and no OpenVINO IR —
+  the iGPU / NPU paths are not viable, see [the plan](docs/QWEN38_FLASH_NEXT.md).
 
 ---
 
@@ -205,12 +205,13 @@ auto-matches the format, then downloads on click**.
 |---|---|---|---|---|
 | **Qwen3.6-35B-A3B** | 35B-A3B · multimodal | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 21.2 / 19.4 GB | SSD + RAM + VRAM |
 | **Qwen3-30B-A3B** | 30B-A3B | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 18.6 / 16.3 GB | SSD + RAM + VRAM |
-| **Qwen3-Next-80B-A3B** | 80B-A3B | llama.cpp CUDA · GGUF | 48.5 GB | SSD + RAM + VRAM |
+| **Qwen3.8-Flash-Next** | 180B stored / 6B active | llama.cpp CUDA · GGUF (UD-IQ1_S) | 66.4 GB | SSD + RAM + VRAM |
 | **Qwen3-8B** | 8B | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 5.0 / 4.7 GB | SSD + RAM (+ VRAM) |
 | **MiniCPM-V-4.5** | 9B · multimodal | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 6.0 / 5.3 GB | SSD + RAM (+ VRAM) |
 
 - **NVIDIA** — always **llama.cpp CUDA** (43.3 tok/s for 8B; OpenVINO only 2.3).
-  From 35B-A3B to 80B-A3B: even 8 GB of VRAM works, thanks to 3-tier offloading.
+  From 35B-A3B to 180B-stored Flash-Next: even 8 GB of VRAM works, thanks to
+  3-tier offloading.
 - **Intel GPU** — **OpenVINO** (~1.8× faster than Vulkan on Arc); 30B / 35B MoE
   can all be offloaded.
 - **NPU** — uses system RAM (no dedicated VRAM tier), so it runs a
@@ -578,10 +579,10 @@ cargo test                          # Rust kernel unit tests
 python scripts/bench_llama.py models/qwen3-8b-gguf/Qwen3-8B-Q4_K_M.gguf --ngl 999
 python scripts/bench_ov.py models/qwen3-8b-int4-cw-ov NPU
 
-# 80B 3-tier offloading
-D:/AI/tools/llama/llama-bench.exe \
-  -m models/qwen3-next-80b-a3b-instruct-gguf/Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf \
-  -ngl 999 -ncmoe 48 -p 512 -n 128 -r 2
+# Qwen3.8-Flash-Next 3-tier offloading (needs LLAMA_ATTN_ROT_DISABLE=1)
+LLAMA_ATTN_ROT_DISABLE=1 D:/AI/tools/llama/llama-bench.exe \
+  -m models/qwen3.8-flash-next-gguf/UD-IQ1_S/Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
+  -ngl 999 -ncmoe 30 -p 512 -n 128 -r 2
 ```
 
 ---

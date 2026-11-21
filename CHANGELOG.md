@@ -11,7 +11,8 @@
 - **Qwen3.8-Flash-Next 实测跑通**（`qwen4exp`，180B 存储 / 6B 激活）：
   在 **8 GB 显存 + 32 GB 内存 + SSD** 上用三层卸载成功加载并推理，
   66.38 GB 权重（UD-IQ1_S）实测通过。
-  - `--n-cpu-moe 30` 为实测最优点：prefill 15.5 / decode 1.93 tok/s（p512）
+  - `--n-cpu-moe 30` 为实测最优点：prefill 16.9 / decode 3.6 tok/s（p512，复测均值）
+  - ncmoe≥40 越过内存边界触发换页、数字抖动不可复现；详见方案文档
   - **256K 上下文可用**（`n_ctx: 262144` 确认）；2K 提示长文召回测试通过
   - 详见 `docs/QWEN38_FLASH_NEXT.md`
 - **架构自适应后端**（`llama_backend.py`）：
@@ -86,6 +87,9 @@
   请求 NPU 但本机无 Intel NPU），并指向诊断命令。
 - 两版 README 新增「环境诊断与问题记录」「AMD 平台支持（规划中）」章节；
   环境变量表与目录结构同步更新。
+- **README / README_EN 旗舰模型由 Qwen3-Next-80B-A3B 换成 Qwen3.8-Flash-Next**：
+  推荐清单、三层卸载实测表与 ncmoe 扫描、亮点摘要、性能复现命令全部改用
+  Flash-Next 的真实数据（ncmoe=30，pp 16.9 / decode 3.6 tok/s）。
 - `.gitignore` 忽略 `logs/`。
 
 ### Fixed
