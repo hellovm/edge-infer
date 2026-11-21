@@ -423,3 +423,44 @@ OpenVINO 2026.4 可见，~11 TOPS）+ Arc iGPU + RTX 4070 8GB + 32GB RAM。
 - PLE 侧车文件说明：`Delgon/Qwen3.8-Flash-Next-PLE-GGUF`
 - SWA fork：`Indras-Mirror/llama.cpp-turboq-mtp`
 - 量化仓库：`unsloth/Qwen3.8-Flash-Next-GGUF`
+
+---
+
+## 11. AirLLM 调研（2026-11-21，与本项目对比）
+
+> 结论先行：**AirLLM 与本项目目标不同——它解决「极小显存能否跑超大模型」，
+> 本项目解决「8GB 显存 + 32GB 内存下尽量快」。同模型（Flash-Next）本项目快约一个数量级。
+> 不建议集成进本项目主干，其价值限于「低于本方案硬件门槛」的兜底场景。**
+
+### 11.1 项目概况
+- `lyogavin/airllm`，Apache-2.0，~33.8k star（2026-09），pip 一行安装。
+- 版本：v4.0.0（2026-09-05）。2026/08 加入 **Qwen3.8-Flash-Next** 支持
+  （`Qwen4ExpForConditionalGeneration`，125B + 51B n-gram，实测 **5.95 GB 显存**），
+  2026/09 加入流式 LoRA 训练（125B 在 RTX 3060 Ti 6GB 内可训）。
+
+### 11.2 实现方式（四条机制）
+| 机制 | 做法 | 代价 |
+|---|---|---|
+| 分层加载 | checkpoint 按层切 shard；模型在 meta 设备实例化（0 显存），forward hook 在每层计算前把权重从盘搬到 GPU、算完即释放 | 每 token 重读全模型，磁盘 IO 成瓶颈 |
+| 块级量化 | bitsandbytes NF4(4bit)/absmax(8bit)，只量化权重不量化激活，离线压盘 | **与预取互斥**；GPU 反量化开销 |
+| 预取 | 单 worker 线程，算层 N 时读层 N+1 到 pinned memory；官方称 ~10% 提速 | 开量化即被禁用 |
+| 逐专家流式(v3.0) | MoE 层用 safetensors seek 只读 token 路由到的专家（K3 每层 896 专家只路由 16 个，单层 55GB→实际读 ~1GB） | 路由调度开销；batch>1 时 IO 放大 |
+
+Flash-Next 特例：51B n-gram 表以 **file-map 留在主机内存**（64GB 机器够），decoder 层照常流式；
+需 Git 版 transformers（内置 qwen4_exp）+ 约 **360 GB checkpoint 磁盘**。
+
+### 11.3 真实性能（官方只报显存、从不报速度）
+速度上限 = 存储读速 ÷ 每 token 权重读取量。Gen4 NVMe ~7GB/s：
+- 70B fp16（140GB）→ 理论下限 ~20 s/token；4bit（35GB）→ ~5 s/token；SATA SSD 更慢到分钟级。
+社区实测：GB10 + Qwen2.5-32B 无压缩 13.3 s/token，4bit 反慢至 106.7 s/token（issue #330，
+因存储够快时反量化只有成本没有收益）；70B 4bit + 热页缓存 ~0.3 tok/s；
+消费级 SSD + 70B 约 0.5–2 tok/s。**同 Flash-Next：本项目 3.6 tok/s，快一个数量级。**
+
+### 11.4 与本项目对比 & 决策
+- 项目定位高度一致（低门槛跑大模型），但**技术路线相反**：AirLLM 把压力全转嫁磁盘，
+  本项目用 32GB 内存常驻换速度。对 16–32GB 内存的普通用户，本项目已在优势区间。
+- **不集成**。理由：① 同硬件速度差一个数量级；② 依赖 PyTorch/transformers Git 版，
+  与本项目「不依赖 torch、纯 llama.cpp/OpenVINO」的轻量链路冲突；③ 360GB 磁盘门槛过高。
+- **可借鉴**：逐专家流式（seek 只读路由专家）思想，与 llama.cpp `--lazy-mode` +
+  ncmoe 专家分层同源；若未来支持显存 <8GB 的兜底设备可参考其 per-expert 思路。
+- **适用场景（供文档标注）**：显存低于 6GB、能接受秒级/token、离线批处理/论文复现。
