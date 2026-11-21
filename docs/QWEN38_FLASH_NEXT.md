@@ -352,8 +352,66 @@ GUI：「设置 → 三层卸载规划」
 - [x] 性能数据记录进本文档
 - [ ] **把 `LLAMA_ATTN_ROT_DISABLE` 与 `--no-reasoning-preserve` 内置进 `llama_backend.py`**
       （目前需手动设置；应按模型架构自动检测 `qwen4exp` 并加参数）
-- [ ] 评估第三方 SWA fork 的必要性（长上下文吞吐提升显著）
-- [ ] 性能数据摘要补进 README 性能表
+- [x] 评估第三方 SWA fork 的必要性（见 §10；长上下文必要，短上下文收益有限）
+- [x] 性能数据摘要补进 README 性能表
+- [ ] MTP / EAGLE 投机解码实测（需专门分支 + MTP GGUF，见 §10.2）
+
+---
+
+## 10. 加速路线调研（2026-11-21）
+
+### 10.1 第三方 SWA fork：`Indras-Mirror/llama.cpp-turboq-mtp`
+
+非官方 llama.cpp 分支（MIT，~94 star），专为 qwen4exp 提供三件事：
+- **SWA**：把多数 dense 全注意力层改为滑动窗口（默认 4096），保留 8 个 Bresenham
+  分布的全局层维持长程召回。解决「dense 层每步扫全部历史 → decode 随上下文线性变慢」。
+- **MTP draft head**（`blk.48`，4B/512-expert）：`--spec-type draft-mtp`。
+- **TBQ4 4-bit KV**（`-ctk tbq4_0 -ctv tbq4_0`）+ PLE-on-SWA。
+
+fork 在 **RTX 4090 24GB** 实测：prefill 200–235 tok/s，decode 22.8 t/s @12K →
+**15.7 t/s @100K**，100K 长程召回通过。启动需加：
+`--override-kv "qwen4exp.attention.sliding_window=int:4096,qwen4exp.attention.swa_global_layers=int:8"`。
+
+**对本机的判断**：本机瓶颈是专家权重从 SSD 分页（物理约束），SWA 优化的是
+>32K 长上下文的注意力衰减。**短上下文（≤32K）收益有限；做 100K 级长文档时这是唯一可行方案。**
+代价：非上游分支、需重编译（`-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89`）、有维护风险。
+
+### 10.2 MTP / EAGLE 投机解码
+
+原理：草稿器（n-gram / MTP 头 / EAGLE-3）一次猜 K 个 token，目标模型一次并行验证。
+**无损**（输出与不投机一致）。接受率 α≥70% 时提速 1.5–2×；α<60% 反而变慢。
+
+公开实测（注意均非本机配置）：
+| 来源 | 配置 | 结果 |
+|---|---|---|
+| dev.to A100 | Flash-Next + MTP | avg 32.6 → **56.1 tok/s**（1.72×），额外 ~6 GiB |
+| Qwen3.6-27B A10G 24G | MTP | 25 → 45 tok/s（+78%） |
+| fork RTX 4090 | Flash-Next MTP | 74.1 t/s（vs 44–50），接受率 0.52–0.67 |
+
+**对 8GB 显存场景的关键分析**：投机解码在**IO/带宽受限**场景理论上收益更大
+（验证 K 个 token 只读一遍专家权重，摊薄 SSD 分页成本）；但 MoE 不同 token 激活的
+专家集合部分重叠，实际节省约 2–3× 而非 4×。约束是 MTP 头额外占 3–6 GiB，
+会把 ncmoe 从 30 进一步压低、加剧显存压力 —— 存在权衡，必须实测接受率。
+上游已合并 MTP（PR #22673），但 qwen4exp 的 MTP 需专门构建
+（`danielhanchen/llama.cpp` 的 `qwen4exp/mtp` 分支 + 单独 MTP GGUF）或上述 fork。
+
+### 10.3 NPU 协同：现阶段对 Flash-Next 不可行
+
+本机诊断确认：Intel Core Ultra 7 155H + **Intel AI Boost NPU**（Meteor Lake 第一代，
+OpenVINO 2026.4 可见，~11 TOPS）+ Arc iGPU + RTX 4070 8GB + 32GB RAM。
+
+- llama.cpp 后端只有 **CPU / CUDA / RPC**，**无 OpenVINO NPU 后端** →
+  Flash-Next 的任何层都无法交给 NPU。
+- NPU SRAM **不可扩展**，只适合 3–7B INT4 小模型；66.38 GB 的 Flash-Next 完全装不下。
+- 第三方 `openvino-llama.cpp` backend 存在但仅支持小模型 + Q4_K_M/Q5_K_M，
+  **不支持 IQ1_S 等 importance-weighted 量化**。
+- 理论上可行但工程未支持：**异构投机解码**（NPU 跑小 draft 模型，CUDA 跑大模型验证，
+  即 SSD / Speculative Speculative Decoding）——llama.cpp 目前草稿与验证必须同后端，做不到。
+
+**结论**：NPU 帮不上 Flash-Next 这个量级的模型。它的合理用途是独立跑小模型
+（3–7B INT4，NPU 18–28 tok/s @ 11W）做低功耗任务，或与独显分工而非协同同一模型。
+**最高优先级仍是升级到 64GB 内存**（消除 SSD 分页，decode 预期 5+ tok/s），
+其次才是 MTP 与 SWA。
 
 ---
 
