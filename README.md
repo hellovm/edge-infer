@@ -241,8 +241,11 @@ HTTP：`GET /edge/tier_plan?model=<模型目录或路径>&vram=8&ram=32`
 export LLAMA_ATTN_ROT_DISABLE=1     # qwen4exp 需要
 
 llama-server -m .../Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
-  -ngl 999 -ncmoe 40 -c 32768 -ctk q8_0 -ctv q8_0 -fa on
+  -ngl 999 -ncmoe 30 -c 32768 -ctk q8_0 -ctv q8_0 -fa on
 ```
+
+> `-ncmoe 30` 是复测确认的稳定最优点（pp 16.9 / decode 3.6 tok/s）。
+> 更大的值（40/44/48）decode 在内存边界剧烈抖动、数字不可信，反而更慢。
 
 > 关键机制：本机 llama.cpp 的 `--lazy-mode` 默认 `auto`，
 > **对 >4 GiB 的张量自动按需读取** —— n-gram 表 28.8 GB 正好命中，
