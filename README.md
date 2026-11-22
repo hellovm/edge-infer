@@ -1,8 +1,8 @@
 # edge-infer
 
-**端侧三层卸载多硬件推理平台 · 本地 AI 工作台**
+**在普通人的电脑上本地运行超大规模模型 · 高能效端侧推理平台**
 
-[![Version](https://img.shields.io/badge/version-0.2.1-2ea44f.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.0-2ea44f.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-个人免费%20·%20商用授权-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![OpenVINO](https://img.shields.io/badge/OpenVINO-2026.4-0091D5.svg)](https://docs.openvino.ai/)
@@ -12,12 +12,18 @@
 
 [English](README_EN.md) · **简体中文**
 
-在 Windows 上运行本地大模型：**Rust 自研三层卸载内核**（SSD / 内存 / 显存）+
-**双推理后端**（NVIDIA → llama.cpp CUDA；Intel GPU / NPU → OpenVINO）+
-**本地 Agent 工作台**（可真正操作文件系统、创建项目文件夹、执行命令）。
+**目标：让普通人的电脑也能本地运行超大规模模型，并以高能效的方式运行。**
 
-> 目标：让原本跑不动大模型的 Windows 笔记本也能跑起来，并支持更长的上下文。
-> 从内核到调度全部独立自主实现。
+一台 8 GB 显存 + 32 GB 内存的普通 Windows 电脑，就能流畅运行 180B 级 MoE 大模型。
+靠的是自研的 **Rust 三层卸载内核**（SSD / 内存 / 显存）+ **MTP 投机解码**，
+在本地把显存、内存、SSD 组织成一条流水线。
+
+- 🧱 **三层卸载** — 权重按热度分布在 SSD / 内存 / 显存，显存不够也能跑大模型
+- ⚡ **MTP 投机解码** — 主模型一次校验多个预判 token，输出完全不变，速度再提约 17%
+- 🔌 **OpenAI 兼容 API** — 对外提供标准 `/v1/chat/completions`，可对接任意 Agent 工作台
+- 🖥 **多硬件后端** — NVIDIA 走 llama.cpp CUDA；Intel GPU / NPU 走 OpenVINO
+
+**下一步目标**：持续提升本地运行性能（更快的 decode、更长的上下文、更低的资源占用）。
 
 ---
 
@@ -25,6 +31,9 @@
 
 - **三层卸载内核（Rust）** — 把 MoE 专家按热度分布在 SSD / RAM / VRAM 三层，
   显存动态探测（NVML），OOM 自动回退（缩短上下文 / 降级专家）。
+- **MTP 投机解码** — 用模型自带的 MTP draft head 预判多个候选 token，
+  主模型一次并行校验（**输出与不开时完全一致**），本机实测生成速度 **+17%**。
+  带 draft 的模型（如 Qwen3.8-Flash-Next）自动启用，可在设置中开关。
 - **Prerouter 预取** — 一步前瞻预测下一 token 要用的专家，在当前前向计算时
   并行把它从慢层拉到快层，用计算掩盖 IO。
 - **双推理路线（按硬件匹配最快的后端）** — 同一份配置下自动分流：
@@ -38,9 +47,8 @@
   关键结论：**OpenVINO 的 GPU 插件面向 Intel 优化，把 N 卡交给它等于浪费约 19 倍性能**
   （实测 decode 2.3 vs 43.3 tok/s）。因此 N 卡一律走 llama.cpp CUDA，
   Intel GPU / NPU 走 OpenVINO。
-  **超大 MoE（Qwen3.8-Flash-Next，180B 存储）在 8 GB 显存上靠 `--n-cpu-moe` 三层卸载也能跑：N 卡 decode 3.6 tok/s。**
-  （完整的 prefill / decode、CPU 与 Vulkan 对照、`ncmoe` 扫描与测试条件见
-  [性能实测](#-性能实测)。）
+  **超大 MoE（Qwen3.8-Flash-Next，180B 存储）在 8 GB 显存上靠 `--n-cpu-moe` 三层卸载也能跑。**
+  （完整数据、`ncmoe` 扫描与 MTP 对比见 [性能实测](#-性能实测)。）
 
 - **同一模型按设备自动匹配格式** — 模型目录按「模型 → 变体」组织：同一个模型名下
   挂 `nvidia` / `intel-gpu` / `npu` 多套变体，选中硬件后自动取对应格式
@@ -55,13 +63,13 @@
   CPU/内存实现三层卸载。
 - **量化说明** — FP4/NVFP4 需 Blackwell（RTX 50 系，sm120）的 FP4 张量核；
   **RTX 40 系（Ada，sm89）没有 FP4 通路**，NVFP4 会退化为软件模拟（可能更慢）。
-  Ada 卡的正确选择是 **FP8**（需 vLLM/TensorRT-LLM）或 **GGUF Q4_K_M / Q5_K_M**。
+  Ada 卡的正确选择是 **FP8**（需 vLLM/TensorRT-LLM）或 **GGUF 量化**。
 - **本地 Agent** — 模型可自主调用工具：创建任务文件夹、
   读写文件、搜索、执行命令；全部限制在沙箱工作区内。
 - **联网搜索** — 内置 Playwright 驱动本机 Edge 抓取搜索结果并注入上下文，
   可与本地模型组合使用（开关式）。
 - **OpenAI 兼容 API** — 对外暴露 `/v1/chat/completions`（含 `stream=true`），
-  可被任意客户端调用；支持 API Key 鉴权。
+  标准协议，可被任意客户端或 Agent 工作台调用；支持 API Key 鉴权。
 - **工作台 GUI** — 对话 / Agent 工作区 / 三层方案 / 模型 / 设置
   五个视图；顶部设备 chip 可点击切换；输入区支持模型选择、文件 / 图片 /
   文件夹上传与联网搜索开关；会话列表持久化，可切换本地引擎 or 外接 OpenAI API。
@@ -128,29 +136,31 @@ Prefill = 提示词处理，decode = 稳态生成。
 
 ### 超大 MoE 三层卸载（重点）
 
-**Qwen3.8-Flash-Next（180B 存储 / 6B 激活，66.4 GB）在 8 GB 显存 + 32 GB 内存上跑起来** ——
+**Qwen3.8-Flash-Next（180B 存储 / 6B 激活）在 8 GB 显存 + 32 GB 内存上跑起来** ——
 这是本项目的核心场景。`--n-cpu-moe` 把 MoE 专家放 CPU/内存、注意力与 dense 层留显存，
 28.8 GB 的 n-gram 表靠 `--lazy-mode` 留在 SSD：
 
-| 后端 · 设备 | 卸载配置 | Prefill tok/s | Decode tok/s | 备注 |
-|---|---|---|---|---|
-| llama.cpp CUDA · RTX 4070 8 GB | `ncmoe=30` | **16.9** | **3.6** | ✅ 稳定最优点 |
-| ~~llama.cpp CUDA · `ncmoe=20`~~ | — | — | — | ❌ OOM（显存不足） |
-
-`--n-cpu-moe` 扫描结果（N 卡，`-p 512 -n 128`，重复 2–3 次）：
-
-| ncmoe | Prefill tok/s | Decode tok/s | 可信度 |
+| 主模型 · 量化 | 后端 · 设备 | 卸载配置 | Decode tok/s |
 |---|---|---|---|
-| 24 | 16.9 | 3.2 | ✅ |
-| **30** | **16.9** | **3.6** | ✅ 最优 |
-| 36 | 13.4 | 4.0 | ✅ |
-| 38 | 13.8 | 2.9 | ✅ |
-| 40 | 13.0 | 2.1 | ⚠️ 抖动 |
-| 44 | 46.0 ±10 | 3.5 | ⚠️ pp 虚高抖动 |
-| 48 | 43.5 ±13 | 3.2 | ⚠️ 抖动 |
+| **UD-Q2_0（65.7 GB）** | llama.cpp CUDA · RTX 4070 8 GB | `ncmoe=35` | **1.1** |
+| UD-IQ1_S（66.4 GB） | 同上 | `ncmoe=30` | 1.1 |
+| UD-IQ4_XS（87 GB） | 同上 | `ncmoe=45` | 1.2 |
 
-> 卸载越多显存压力越小，但 ncmoe 过大会让专家权重超出可用内存、触发换页而变慢。
-> **ncmoe=30 是稳定平衡点。**
+> 三种量化等级 decode 几乎相同 —— 因为瓶颈是 **SSD 分页加载专家权重的 IO**，
+> 不是计算或量化精度。这也决定了「跑得动大模型」的性价比主要来自三层卸载本身。
+
+**MTP 投机解码对比**（同一真实任务，`-c 4096 -n 192`，各测 2 次取稳）：
+
+| 主模型 | 无 MTP | + MTP（shared draft，n-max 2） | 提升 |
+|---|---|---|---|
+| **UD-Q2_0** | 1.2 t/s | **1.4 t/s** | **+17%** |
+| UD-IQ1_S | 1.1 t/s | 1.3 t/s | +18% |
+| UD-IQ4_XS | 1.2 t/s | 1.4 t/s | +17% |
+
+> MTP 用 draft head 预判多个候选 token，主模型**一次并行校验**（数学上无损，
+> 输出与不开时逐字一致）。提速稳定在 **~17%**，且同样受限于 SSD 带宽 ——
+> 它减少 decode 步数，但绕不过每步的专家权重加载。
+> draft 优先选 `shared-` 变体（借用主模型 embedding，更省内存、更快）。
 
 ### 怎么读这组数
 
@@ -188,17 +198,19 @@ Prefill = 提示词处理，decode = 稳态生成。
 
 | 模型 | 参数 | 后端 · 格式 | 体积 | 分层 |
 |---|---|---|---|---|
+| **Qwen3.8-Flash-Next** ⭐ | 180B 存储 / 6B 激活 | llama.cpp CUDA · GGUF（UD-Q2_0）+ MTP | 65.7 + 1.8 GB | SSD + 内存 + 显存 |
 | **Qwen3.6-35B-A3B** | 35B-A3B · 多模态 | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 21.2 / 19.4 GB | SSD + 内存 + 显存 |
 | **Qwen3-30B-A3B** | 30B-A3B | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 18.6 / 16.3 GB | SSD + 内存 + 显存 |
-| **Qwen3.8-Flash-Next** | 180B 存储 / 6B 激活 | llama.cpp CUDA · GGUF（UD-IQ1_S） | 66.4 GB | SSD + 内存 + 显存 |
 | **Qwen3-8B** | 8B | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 5.0 / 4.75 GB | SSD + 内存（+ 显存） |
 | **MiniCPM-V-4.5** | 9B · 多模态 | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 6.0 / 5.26 GB | SSD + 内存（+ 显存） |
 
+- ⭐ **默认旗舰组合：Qwen3.8-Flash-Next（UD-Q2_0）+ shared-Q4_K_M MTP draft** ——
+  180B 存储的旗舰 MoE，在 8 GB 显存 / 32 GB 内存上即可运行，并自动启用 MTP 投机解码。
 - **N 卡**：一律走 **llama.cpp CUDA**（8B 实测 43.3 tok/s；交给 OpenVINO 只有 2.3）。
   从 35B-A3B 到 180B 存储的 Flash-Next —— 8 GB 显存也能跑，靠三层卸载。
 - **i 卡**：走 **OpenVINO**（Arc 上比 Vulkan 快约 1.8×），30B / 35B MoE 均可卸载。
 - **NPU**：本身就用系统内存（无独立显存层），因此走 **SSD + 内存两层分片**；
-  已实测 9B 多模态（MiniCPM-V-4.5，对称 INT4），30B 级 MoE 验证进行中。
+  已实测 9B 多模态（MiniCPM-V-4.5，对称 INT4）。
 
 > **同一模型按设备自动切换格式**：上表里同一模型名在 N 卡下取 GGUF、在 i 卡 / NPU 下取
 > OpenVINO IR —— 由 `model_catalog.py` 的「模型 → 变体」结构 + `resolve_device()`
@@ -242,19 +254,24 @@ HTTP：`GET /edge/tier_plan?model=<模型目录或路径>&vram=8&ram=32`
 
 | 层 | 容量 | 放什么 |
 |---|---|---|
-| VRAM | 8 GB | 注意力 + norm + 输出（~1.7 GB）+ 部分专家 |
-| RAM | 32 GB | 主干 37.57 GB 的剩余部分 |
-| **SSD** | 1.1 TB | **n-gram 表 28.8 GB**（lazy 按需读，不占常驻内存） |
+| VRAM | 8 GB | 注意力 + norm + 输出 + 部分专家 |
+| RAM | 32 GB | 主干权重 + 热专家 |
+| **SSD** | — | **n-gram 表 28.8 GB**（lazy 按需读，不占常驻内存）+ 冷专家 |
+
+推荐组合 **UD-Q2_0 + shared-Q4_K_M MTP draft**（应用内自动配置）：
 
 ```bash
 export LLAMA_ATTN_ROT_DISABLE=1     # qwen4exp 需要
 
-llama-server -m .../Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
-  -ngl 999 -ncmoe 30 -c 32768 -ctk q8_0 -ctv q8_0 -fa on
+llama-server -m .../Qwen3.8-Flash-Next-UD-Q2_0-00001-of-00003.gguf \
+  -md .../MTP/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf \
+  --spec-type draft-mtp --spec-draft-n-max 2 \
+  -ngl 999 -ncmoe 35 --tensor-split 1 -c 32768 -fa on
 ```
 
-> `-ncmoe 30` 是稳定最优点（pp 16.9 / decode 3.6 tok/s）。
-> 更大的值会因专家权重超出可用内存而变慢。
+> `-ncmoe 35` 是稳定最优点；`--tensor-split 1` 在加载 MTP draft 时必须显式指定
+> （否则第二个模型加载时会因空闲显存探测为 0 而失败）。
+> 实测：8 GB 显存 / 32 GB 内存下，开启 MTP 生成速度 **+17%**。
 
 > 关键机制：llama.cpp 的 `--lazy-mode` 默认 `auto`，
 > **对 >4 GiB 的张量自动按需读取** —— n-gram 表 28.8 GB 正好命中，
@@ -391,6 +408,9 @@ GUI 的「项目」视图提供：项目列表、文件树、文件编辑器（�
 
 ## 🌐 OpenAI 兼容 API
 
+对外提供**标准 OpenAI 接口**，因此理论上可对接**任意支持该标准的 Agent 工作台 / 客户端**
+（本地或远程），把本机的三层卸载算力当成一个 OpenAI 端点来用。
+
 ```bash
 # 非流式
 curl http://127.0.0.1:8080/v1/chat/completions \
@@ -454,7 +474,7 @@ prompt 或文件内容。
 
 ## 🔵 AMD 平台兼容性
 
-当前版本（v0.2.1）支持 **NVIDIA GPU** 与 **Intel GPU / NPU**；
+当前版本（v0.3.0）支持 **NVIDIA GPU** 与 **Intel GPU / NPU**；
 在 AMD 平台会**安全回退 CPU**（不崩溃，但无加速）。
 
 | 硬件 | 状态 |
@@ -482,6 +502,7 @@ OpenVINO 的 GPU / NPU 插件为 Intel 专属，无法驱动 AMD XDNA NPU，
 | `EDGE_N_CPU_MOE` | `0` | 放在 CPU/内存的 MoE 层数（三层卸载开关） |
 | `EDGE_CTX` | `32768` | llama.cpp 上下文窗口（最大 1048576） |
 | `EDGE_KV_QUANT` | 自动 | KV cache 量化；≥64K 上下文时自动用 `q8_0` |
+| `EDGE_MTP_DRAFT` | 自动 | MTP draft 模型路径；留空则自动在同级 `MTP/` 目录查找 |
 | `EDGE_LOG_LEVEL` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARNING` |
 | `EDGE_DIAG_BOOT` | `0` | `1` = 启动时自动生成诊断包 |
 

@@ -295,6 +295,7 @@ class ChatRequest(BaseModel):
     stream: bool = False
     device: Optional[str] = None          # override EDGE_DEVICE per request
     enable_thinking: bool = False         # Qwen3 thinking mode
+    mtp: bool = True                      # enable MTP speculative decoding when a draft exists
     attachments: List[dict] = []          # [{name, content}] inline text files
     images: List[str] = []                # [{data_url}] inline images (VLM)
     web_search: bool = False              # search the web and inject results
@@ -554,12 +555,23 @@ def _dir_state(d: str) -> str:
     if not entries:
         return "empty"
 
-    has_incomplete = any(e.endswith((".incomplete", ".part", ".tmp")) for e in entries)
+    # Look one level deep too: some repos keep the quant in a subfolder
+    # (e.g. ``UD-Q2_0/…gguf``) with the MTP draft in a sibling ``MTP/``.
+    all_files = list(entries)
+    for e in entries:
+        sub = os.path.join(d, e)
+        if os.path.isdir(sub):
+            try:
+                all_files += os.listdir(sub)
+            except OSError:
+                pass
+
+    has_incomplete = any(e.endswith((".incomplete", ".part", ".tmp")) for e in all_files)
     if has_incomplete:
         return "downloading"
 
     # GGUF: any real .gguf (weights, ignoring the tiny mmproj projector)
-    ggufs = [e for e in entries if e.endswith(".gguf")]
+    ggufs = [e for e in all_files if e.endswith(".gguf")]
     weights = [e for e in ggufs if "mmproj" not in e.lower()]
     if weights:
         # .gguf files are downloaded via ModelScope's own temp names, so a
@@ -845,6 +857,37 @@ def _find_gguf(model_dir: str) -> Optional[str]:
     return None
 
 
+def _auto_draft(gguf_path: str) -> str:
+    """Find an MTP draft head next to the target model, else return ''.
+
+    Expects a sibling ``MTP/`` folder (as shipped by unsloth's GGUF repos).
+    Prefers a ``shared-`` head: it borrows the target's token embedding and
+    output projection, so it is smaller and drafts faster than a self-contained
+    copy. Falls back to any single ``.gguf`` there.
+    """
+    try:
+        model_dir = os.path.dirname(os.path.abspath(gguf_path))
+        mtp_dir = os.path.join(os.path.dirname(model_dir), "MTP")
+        if not os.path.isdir(mtp_dir):
+            mtp_dir = os.path.join(model_dir, "MTP")
+        if not os.path.isdir(mtp_dir):
+            return ""
+        cands = [os.path.join(mtp_dir, f) for f in os.listdir(mtp_dir)
+                 if f.lower().endswith(".gguf") and "incomplete" not in f.lower()]
+        if not cands:
+            return ""
+        shared = [p for p in cands if "shared" in os.path.basename(p).lower()]
+        pool = shared or cands
+        # Prefer Q4_K_M (best size/acceptance balance measured here).
+        for pref in ("q4_k_m", "q8_0"):
+            for p in pool:
+                if pref in os.path.basename(p).lower():
+                    return p
+        return pool[0]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     """Proxy a streaming completion to a local llama-server (OpenAI API).
 
@@ -875,15 +918,27 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     kv_q = os.environ.get("EDGE_KV_QUANT", "")
     if not kv_q:
         kv_q = "q8_0" if ctx_size >= 65536 else ""
+
+    # MTP draft head (speculative decoding). Set EDGE_MTP_DRAFT to a path, or
+    # leave it auto: for a split model we look for a sibling ``MTP/`` folder and
+    # prefer the ``shared-`` head (borrows the target's embedding, smaller/faster).
+    # The GUI switch (req.mtp) can turn it off; a model without a head simply
+    # runs normally.
+    draft_path = os.environ.get("EDGE_MTP_DRAFT", "")
+    if not draft_path and getattr(req, "mtp", True):
+        draft_path = _auto_draft(gguf_path)
+
     if not _llama.running() or (_llama._cfg and (
             _llama._cfg.model_path != gguf_path or _llama._cfg.reasoning != want_think
-            or _llama._cfg.kv_quant != kv_q or _llama._cfg.ctx != ctx_size)):
+            or _llama._cfg.kv_quant != kv_q or _llama._cfg.ctx != ctx_size
+            or _llama._cfg.draft_path != draft_path)):
         # NVIDIA → offload everything to CUDA (discrete VRAM). MoE layers can be
         # pushed to CPU/RAM via EDGE_N_CPU_MOE when the model exceeds VRAM.
         n_cpu_moe = int(os.environ.get("EDGE_N_CPU_MOE", "0") or 0)
         _llama.load(LlamaConfig(model_path=gguf_path, port=8081,
                                 n_cpu_moe=n_cpu_moe, reasoning=want_think,
-                                kv_quant=kv_q, ctx=ctx_size))
+                                kv_quant=kv_q, ctx=ctx_size,
+                                draft_path=draft_path))
 
     msgs = []
     if system:

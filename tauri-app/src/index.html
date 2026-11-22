@@ -360,6 +360,7 @@ const state={health:null,convs:LS.read("convs",[]),curConv:null,busy:false,
   useExternal:LS.read("useExternal",false),ext:LS.read("ext",{base:"",key:"",model:""}),
   device:LS.read("device","auto"),stream:LS.read("stream",true),
   thinking:LS.read("thinking",false),agentMode:LS.read("agentMode",false),
+  mtp:LS.read("mtp",true),
   modelId:LS.read("modelId",null),
   showArchived:false, attachments:[]};
 
@@ -654,7 +655,7 @@ async function send(){
       body.classList.remove("cursor"); body.textContent=text;
     } else if(state.stream && !state.useExternal){
       const payload={model:"qwen",model_id:state.modelId,messages:[{role:"user",content:t}],max_tokens:512,temperature:0,stream:true,
-        device:state.device,enable_thinking:state.thinking,web_search:!!state.webSearch,
+        device:state.device,enable_thinking:state.thinking,web_search:!!state.webSearch,mtp:state.mtp,
         attachments:atts.filter(a=>a.kind!=="image").map(a=>({name:a.name,content:a.content})),
         images:atts.filter(a=>a.kind==="image"&&a.image).map(a=>a.image)};
       const resp=await fetch(API+"/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
@@ -834,6 +835,11 @@ const PANELS={
         <div class="devs" id="devGrid"></div>
         <div class="desc" id="devHint" style="margin-top:10px"></div>
       </div>
+      <div class="sec"><h3>性能加速</h3>
+        <div class="frow"><div class="lbl">MTP 投机解码<small>预判多个 token 由主模型一次校验，输出不变、速度更快</small></div>
+          <div class="switch" id="swMtp" onclick="toggleMtp()"><i></i></div></div>
+        <div class="desc">开启后，凡带 MTP draft 的模型（如 Qwen3.8-Flash-Next）自动启用，实测可提升约 17% 生成速度。</div>
+      </div>
       <div class="sec"><h3>推理源</h3>
         <div class="frow"><div class="lbl">使用外接 API<small>关闭时使用本地引擎</small></div>
           <div class="switch" id="swExternal" onclick="toggleExternal()"><i></i></div></div>
@@ -870,8 +876,13 @@ const PANELS={
         <div id="tierOut" class="mono" style="margin-top:10px;font-size:12px;white-space:pre-wrap;color:var(--dim);max-height:320px;overflow:auto"></div>
       </div>
       <div class="sec"><h3>关于</h3>
-        <div class="desc">edge-infer · 三层卸载多硬件推理平台 v0.2.1<br>
-        Rust 内核（edge-detect / edge-tiers / edge-prefetch / edge-engine）+ OpenVINO 推理服务。</div>
+        <div class="desc"><b>edge-infer · 端侧大模型推理平台 v0.3.0</b><br>
+        目标：让普通人的电脑也能本地运行超大规模模型，并以高能效方式运行。<br>
+        通过 SSD / 内存 / 显存三层卸载 + MTP 投机解码，180B 级 MoE 在 8 GB 显存、
+        32 GB 内存的普通电脑上即可流畅对话。<br>
+        对外提供 OpenAI 兼容 API，可对接任意支持该标准的 Agent 工作台。</div>
+        <div class="frow"><div class="lbl">核心内核</div><span>Rust（edge-detect / edge-tiers / edge-prefetch / edge-engine）</span></div>
+        <div class="frow"><div class="lbl">推理后端</div><span>llama.cpp (CUDA) · OpenVINO (GPU / NPU)</span></div>
         <div class="frow"><div class="lbl">开发者</div><span>HelloVM</span></div>
         <div class="frow"><div class="lbl">项目主页</div><span class="mono">github.com/hellovm/edge-infer</span></div>
         <div class="frow"><div class="lbl">日志文件</div><span class="mono">logs/edge-server.log</span></div>
@@ -1060,12 +1071,15 @@ function initSettings(){
   $("extFields").style.display=state.useExternal?"block":"none";
   $("extBase").value=state.ext.base||""; $("extKey").value=state.ext.key||""; $("extModel").value=state.ext.model||"";
   ["extBase","extKey","extModel"].forEach(id=>$(id).onchange=()=>{ state.ext={base:$("extBase").value,key:$("extKey").value,model:$("extModel").value}; LS.write("ext",state.ext); });
+  $("swMtp").classList.toggle("on",state.mtp);
   $("apiBase").textContent=API;
   renderDevGrid();
   loadDiagnostics();
   refreshProblemCount();
   loadTierModels();
 }
+function toggleMtp(){ state.mtp=!state.mtp; LS.write("mtp",state.mtp); $("swMtp").classList.toggle("on",state.mtp);
+  toast(state.mtp?"已开启 MTP 投机解码":"已关闭 MTP 投机解码"); }
 
 // ---- 环境诊断 / 问题记录 ----
 async function loadDiagnostics(){

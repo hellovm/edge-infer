@@ -41,6 +41,33 @@ from typing import Dict, List, Optional
 
 # Each model: metadata + variants keyed by device ("nvidia" | "intel-gpu" | "npu").
 MODELS: List[dict] = [
+    # ------------------------------------------------------------------ Qwen3.8-Flash-Next
+    {
+        "name": "Qwen3.8-Flash-Next",
+        "params": "180B",
+        "active": "6B",
+        "mm": True,
+        "note": "旗舰 MoE（180B 存储 / 6B 激活）· 三层卸载首选 · 可配 MTP 投机解码再提速",
+        "variants": {
+            "nvidia": {
+                "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+                "subdir": "UD-Q2_0",
+                "quant": "GGUF UD-Q2_0",
+                "backend": "llama.cpp (CUDA)",
+                "size_gb": 65.7,
+                "ram_hint": "≥ 32 GB 内存；8 GB 显存 + 三层卸载（推荐 ncmoe=35）",
+                "min_ssd_gb": 70,
+                "files": ["*UD-Q2_0*.gguf"],
+                "draft": {
+                    "subdir": "MTP",
+                    "file": "mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf",
+                    "quant": "MTP draft shared-Q4_K_M",
+                    "size_gb": 1.8,
+                    "note": "投机解码 draft head（无损，实测 +17% decode）",
+                },
+            },
+        },
+    },
     # ------------------------------------------------------------------ Qwen3.6-35B-A3B
     {
         "name": "Qwen3.6-35B-A3B",

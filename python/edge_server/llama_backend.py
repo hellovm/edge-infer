@@ -26,8 +26,12 @@ from dataclasses import dataclass
 from typing import Iterator, Optional
 
 # Where we look for the prebuilt binaries (downloaded from llama.cpp releases).
+# The Qwen3.8-Flash-Next build (with MTP speculative decoding) lives under
+# ``llama-unsloth``; the plain build stays as a fallback.
 _LLAMA_DIRS = [
     os.environ.get("EDGE_LLAMA_DIR", ""),
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "tools", "llama-unsloth"),
+    r"D:\AI\tools\llama-unsloth",
     r"D:\AI\tools\llama",
     r"C:\llama.cpp",
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "tools", "llama"),
@@ -101,7 +105,15 @@ def _read_arch(model_path: str) -> str:
 _ARCH_FLAGS = {
     # qwen4exp (Qwen3.8-Flash-Next) does not implement upstream's RoPE rotation
     # (#21038); without this the results are wrong or the load fails.
-    "qwen4exp": {"env": {"LLAMA_ATTN_ROT_DISABLE": "1"}},
+    # ``--tensor-split 1`` is required whenever a second model (the MTP draft)
+    # loads after the target: otherwise the free-VRAM-based default split sees
+    # 0 free and aborts with "invalid vector subscript".
+    # ``ncmoe`` is the measured stable offload point on 8 GB VRAM + 32 GB RAM.
+    "qwen4exp": {
+        "env": {"LLAMA_ATTN_ROT_DISABLE": "1"},
+        "args": ["--tensor-split", "1"],
+        "ncmoe": 35,
+    },
 }
 
 
@@ -115,6 +127,8 @@ class LlamaConfig:
     threads: int = 0             # 0 -> auto
     reasoning: bool = False      # Qwen3 thinking; off by default for chat
     kv_quant: str = ""           # "" | q8_0 | q4_0 ... (applied to K and V)
+    draft_path: str = ""         # MTP draft head (enables speculative decoding)
+    spec_n_max: int = 2          # draft tokens per step (2 measured best here)
     extra_args: tuple = ()       # escape hatch for arch-specific flags
 
 
@@ -157,9 +171,13 @@ class LlamaBackend:
         env = os.environ.copy()
         arch_extra: list = []
         spec = _ARCH_FLAGS.get(self._arch)
+        n_cpu_moe = cfg.n_cpu_moe
         if spec:
             env.update(spec.get("env", {}))
             arch_extra.extend(spec.get("args", []))
+            # Apply the arch's measured offload default unless the caller set one.
+            if not n_cpu_moe and spec.get("ncmoe"):
+                n_cpu_moe = int(spec["ncmoe"])
 
         args = [
             exe,
@@ -169,14 +187,24 @@ class LlamaBackend:
             "-c", str(cfg.ctx),
             "-ngl", str(cfg.n_gpu_layers),
         ]
-        if cfg.n_cpu_moe:
+        if n_cpu_moe:
             # llama.cpp 的 3 层卸载关键参数：把 n 个 MoE 层放 CPU/内存。
-            args += ["--n-cpu-moe", str(cfg.n_cpu_moe)]
+            args += ["--n-cpu-moe", str(n_cpu_moe)]
         if cfg.threads:
             args += ["-t", str(cfg.threads)]
         if cfg.kv_quant:
             # KV 量化是大上下文的关键（256K × f16 会吃掉数 GB 显存）。
             args += ["-ctk", cfg.kv_quant, "-ctv", cfg.kv_quant]
+
+        # MTP speculative decoding: a small draft head proposes tokens that the
+        # target verifies in one pass (lossless). Measured ~+17% decode here;
+        # the gain is capped by SSD paging, not by the head's precision.
+        if cfg.draft_path and os.path.isfile(cfg.draft_path):
+            args += [
+                "-md", cfg.draft_path,
+                "--spec-type", "draft-mtp",
+                "--spec-draft-n-max", str(cfg.spec_n_max),
+            ]
 
         # Qwen3-style thinking: off by default (much faster, cleaner answers);
         # `--reasoning-format deepseek` keeps any thoughts out of `content`.

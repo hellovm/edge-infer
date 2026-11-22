@@ -1,8 +1,8 @@
 # edge-infer
 
-**On-device 3-tier offloading inference platform · local AI workbench**
+**Run very large models locally on an ordinary PC · energy-efficient on-device inference**
 
-[![Version](https://img.shields.io/badge/version-0.2.1-2ea44f.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.0-2ea44f.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-Free%20personal%20%7C%20Commercial-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![OpenVINO](https://img.shields.io/badge/OpenVINO-2026.4-0091D5.svg)](https://docs.openvino.ai/)
@@ -12,13 +12,18 @@
 
 **English** · [简体中文](README.md)
 
-Run local LLMs on Windows: a **self-built Rust 3-tier offloading kernel**
-(SSD / RAM / VRAM) + **two inference backends** (NVIDIA → llama.cpp CUDA;
-Intel GPU / NPU → OpenVINO) + a **local agent workbench** that can actually
-touch the filesystem, scaffold projects and run commands.
+**Goal: let an ordinary PC run very large models locally, and run them energy-efficiently.**
 
-> Goal: let a Windows laptop that "can't run big models" run them anyway,
-> with longer context. Kernel and scheduler are all implemented from scratch.
+An ordinary Windows PC with **8 GB VRAM + 32 GB RAM** can run a **180B-class MoE**
+model smoothly — via a self-built **Rust 3-tier offloading kernel** (SSD / RAM / VRAM)
+plus **MTP speculative decoding**, arranged as one local pipeline.
+
+- 🧱 **3-tier offloading** — weights are placed across SSD / RAM / VRAM by heat; big models run even without enough VRAM
+- ⚡ **MTP speculative decoding** — the target verifies several proposed tokens per pass; output is unchanged, ~17% faster
+- 🔌 **OpenAI-compatible API** — a standard `/v1/chat/completions` endpoint, pluggable into any agent workbench
+- 🖥 **Multi-hardware backends** — NVIDIA via llama.cpp CUDA; Intel GPU / NPU via OpenVINO
+
+**Next goal**: keep pushing local inference performance (faster decode, longer context, lower footprint).
 
 ---
 
@@ -27,6 +32,11 @@ touch the filesystem, scaffold projects and run commands.
 - **3-tier offloading kernel (Rust)** — distributes MoE experts across
   SSD / RAM / VRAM by heat; dynamic VRAM probing (NVML); automatic OOM
   fallback (shorter context / demoted experts).
+- **MTP speculative decoding** — a model's built-in MTP draft head proposes
+  several candidate tokens, verified by the target in one pass (**output is
+  bit-for-bit identical to running without it**); measured **+17%** generation
+  speed here. Auto-enabled for models that ship a draft (e.g. Qwen3.8-Flash-Next),
+  toggleable in Settings.
 - **Prerouter prefetch** — predicts the experts the next token needs and pulls
   them from the slow tier to the fast tier *while* the current forward pass
   runs, hiding IO behind compute.
@@ -43,9 +53,9 @@ touch the filesystem, scaffold projects and run commands.
   card wastes roughly 19× the throughput** (measured decode 2.3 vs 43.3 tok/s).
   So NVIDIA always goes through llama.cpp CUDA, while Intel GPU / NPU go through
   OpenVINO. Large MoE (Qwen3.8-Flash-Next, 180B stored) still runs on 8 GB VRAM
-  via `--n-cpu-moe` 3-tier offloading — **3.6 tok/s decode on NVIDIA**.
-  (Full prefill/decode, CPU & Vulkan references, the `ncmoe` sweep and test
-  conditions are in [Performance](#-performance).)
+  via `--n-cpu-moe` 3-tier offloading.
+  (Full data, the `ncmoe` sweep and the MTP comparison are in
+  [Performance](#-performance).)
 
 - **One model, format auto-matched to the device** — the catalog is organised
   as *model → variants*: a single model name carries `nvidia` / `intel-gpu` /
@@ -143,30 +153,35 @@ Prefill = prompt processing, decode = steady-state generation.
 
 ### Large MoE 3-tier offloading (the headline)
 
-**Qwen3.8-Flash-Next (180B stored / 6B active, 66.4 GB) runs on 8 GB VRAM +
+**Qwen3.8-Flash-Next (180B stored / 6B active) runs on 8 GB VRAM +
 32 GB RAM** — this is the project's core scenario. `--n-cpu-moe` keeps MoE
 experts on CPU/RAM while attention and dense layers stay in VRAM; the 28.8 GB
 n-gram table stays on SSD via `--lazy-mode`:
 
-| Backend · Device | Offload config | Prefill tok/s | Decode tok/s | Notes |
-|---|---|---|---|---|
-| llama.cpp CUDA · RTX 4070 8 GB | `ncmoe=30` | **16.9** | **3.6** | ✅ stable sweet spot |
-| ~~llama.cpp CUDA · `ncmoe=20`~~ | — | — | — | ❌ OOM (not enough VRAM) |
-
-`--n-cpu-moe` sweep (NVIDIA, `-p 512 -n 128`, 2–3 repeats):
-
-| ncmoe | Prefill tok/s | Decode tok/s | Reliable |
+| Target · quant | Backend · device | Offload | Decode tok/s |
 |---|---|---|---|
-| 24 | 16.9 | 3.2 | ✅ |
-| **30** | **16.9** | **3.6** | ✅ best |
-| 36 | 13.4 | 4.0 | ✅ |
-| 38 | 13.8 | 2.9 | ✅ |
-| 40 | 13.0 | 2.1 | ⚠️ jitter |
-| 44 | 46.0 ±10 | 3.5 | ⚠️ inflated pp, jitter |
-| 48 | 43.5 ±13 | 3.2 | ⚠️ jitter |
+| **UD-Q2_0 (65.7 GB)** | llama.cpp CUDA · RTX 4070 8 GB | `ncmoe=35` | **1.1** |
+| UD-IQ1_S (66.4 GB) | same | `ncmoe=30` | 1.1 |
+| UD-IQ4_XS (87 GB) | same | `ncmoe=45` | 1.2 |
 
-> More offload means less VRAM pressure, but too much spills experts beyond
-> available memory and slows things down. **ncmoe=30 is the stable sweet spot.**
+> All three quantization levels decode about the same — the bottleneck is the
+> **SSD paging of expert weights**, not compute or quantization precision. This
+> is exactly why 3-tier offloading, not a fancier quant, is what makes big
+> models runnable.
+
+**MTP speculative decoding** (same real task, `-c 4096 -n 192`, 2 runs, averaged):
+
+| Target | no MTP | + MTP (shared draft, n-max 2) | Gain |
+|---|---|---|---|
+| **UD-Q2_0** | 1.2 t/s | **1.4 t/s** | **+17%** |
+| UD-IQ1_S | 1.1 t/s | 1.3 t/s | +18% |
+| UD-IQ4_XS | 1.2 t/s | 1.4 t/s | +17% |
+
+> MTP lets the draft head propose several tokens that the target verifies in a
+> single pass (mathematically lossless — output matches token-for-token). The
+> gain sits at **~17%**, again capped by SSD bandwidth: it cuts the number of
+> decode steps but cannot avoid loading expert weights each step.
+> Prefer a `shared-` draft (borrows the target's embedding — smaller and faster).
 
 ### Reading the numbers
 
@@ -182,7 +197,7 @@ n-gram table stays on SSD via `--lazy-mode`:
 - **iGPU/Vulkan trade-off**: for 8B on the Arc iGPU, Vulkan (140/9.2) is
   **slower** than OpenVINO (1298/12.0) — OpenVINO is Intel's native optimized
   path; for 30B/35B MoE with no IR build, Vulkan + `--n-cpu-moe` works.
-- **Qwen3.8-Flash-Next is NVIDIA-only**: 66.4 GB weights and no OpenVINO IR —
+- **Qwen3.8-Flash-Next is NVIDIA-only**: 66+ GB weights and no OpenVINO IR —
   the iGPU / NPU paths are not viable.
 
 ### How approaches compare
@@ -209,20 +224,22 @@ auto-matches the format, then downloads on click**.
 
 | Model | Params | Backend · format | Size | Tiers |
 |---|---|---|---|---|
+| **Qwen3.8-Flash-Next** ⭐ | 180B stored / 6B active | llama.cpp CUDA · GGUF (UD-Q2_0) + MTP | 65.7 + 1.8 GB | SSD + RAM + VRAM |
 | **Qwen3.6-35B-A3B** | 35B-A3B · multimodal | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 21.2 / 19.4 GB | SSD + RAM + VRAM |
 | **Qwen3-30B-A3B** | 30B-A3B | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 18.6 / 16.3 GB | SSD + RAM + VRAM |
-| **Qwen3.8-Flash-Next** | 180B stored / 6B active | llama.cpp CUDA · GGUF (UD-IQ1_S) | 66.4 GB | SSD + RAM + VRAM |
 | **Qwen3-8B** | 8B | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 5.0 / 4.7 GB | SSD + RAM (+ VRAM) |
 | **MiniCPM-V-4.5** | 9B · multimodal | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 6.0 / 5.3 GB | SSD + RAM (+ VRAM) |
 
+- ⭐ **Default flagship combo: Qwen3.8-Flash-Next (UD-Q2_0) + shared-Q4_K_M MTP
+  draft** — a 180B-stored flagship MoE that runs on 8 GB VRAM / 32 GB RAM with
+  MTP speculative decoding enabled automatically.
 - **NVIDIA** — always **llama.cpp CUDA** (43.3 tok/s for 8B; OpenVINO only 2.3).
   From 35B-A3B to 180B-stored Flash-Next: even 8 GB of VRAM works, thanks to
   3-tier offloading.
 - **Intel GPU** — **OpenVINO** (~1.8× faster than Vulkan on Arc); 30B / 35B MoE
   can all be offloaded.
 - **NPU** — uses system RAM (no dedicated VRAM tier), so it runs a
-  **SSD + RAM two-tier split**; 9B multimodal (MiniCPM-V-4.5, symmetric INT4)
-  is verified, 30B-class MoE validation is ongoing.
+  **SSD + RAM two-tier split**; 9B multimodal (MiniCPM-V-4.5, symmetric INT4) is verified.
 
 > **One model, format auto-switched per device**: the same model name resolves to
 > GGUF on NVIDIA and OpenVINO IR on Intel GPU / NPU — handled by the
@@ -270,16 +287,24 @@ Tier allocation:
 
 | Tier | Capacity | Holds |
 |---|---|---|
-| VRAM | 8 GB | attention + norm + output (~1.7 GB) + some experts |
-| RAM | 32 GB | the rest of the 37.57 GB backbone |
-| **SSD** | 1.1 TB | **the 28.8 GB n-gram table** (lazy, not resident) |
+| VRAM | 8 GB | attention + norm + output + some experts |
+| RAM | 32 GB | backbone + hot experts |
+| **SSD** | — | **the 28.8 GB n-gram table** (lazy, not resident) + cold experts |
+
+Recommended combo **UD-Q2_0 + shared-Q4_K_M MTP draft** (set up automatically in-app):
 
 ```bash
 export LLAMA_ATTN_ROT_DISABLE=1     # required by qwen4exp
 
-llama-server -m .../Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf \
-  -ngl 999 -ncmoe 40 -c 32768 -ctk q8_0 -ctv q8_0 -fa on
+llama-server -m .../Qwen3.8-Flash-Next-UD-Q2_0-00001-of-00003.gguf \
+  -md .../MTP/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf \
+  --spec-type draft-mtp --spec-draft-n-max 2 \
+  -ngl 999 -ncmoe 35 --tensor-split 1 -c 32768 -fa on
 ```
+
+> `-ncmoe 35` is the stable sweet spot. `--tensor-split 1` is required when an
+> MTP draft is loaded (otherwise the second model's free-VRAM probe sees 0 and
+> loading fails). Measured **+17%** generation with MTP on 8 GB VRAM / 32 GB RAM.
 
 > Key mechanism: this build's `--lazy-mode` defaults to `auto`, which reads
 > **any tensor larger than 4 GiB** on demand — the 28.8 GB n-gram table
@@ -420,6 +445,10 @@ The GUI *Projects* view offers a project list, file tree, file editor
 
 ## 🌐 OpenAI-compatible API
 
+Exposes a **standard OpenAI interface**, so it can plug into **any agent
+workbench / client that speaks the OpenAI standard** (local or remote), turning
+this machine's 3-tier offloading compute into an OpenAI endpoint.
+
 ```bash
 # non-streaming
 curl http://127.0.0.1:8080/v1/chat/completions \
@@ -485,7 +514,7 @@ or file contents are ever captured.
 
 ## 🔵 AMD platform compatibility
 
-v0.2.1 supports **NVIDIA GPU** and **Intel GPU / NPU**. On AMD the product
+v0.3.0 supports **NVIDIA GPU** and **Intel GPU / NPU**. On AMD the product
 **falls back to CPU safely** (no crash, but no acceleration).
 
 | Hardware | Status |
@@ -513,6 +542,7 @@ support is on the roadmap.
 | `EDGE_N_CPU_MOE` | `0` | MoE layers kept on CPU/RAM (3-tier offload knob) |
 | `EDGE_CTX` | `32768` | llama.cpp context window (max 1048576) |
 | `EDGE_KV_QUANT` | auto | KV cache quantisation; `q8_0` auto-applied at ≥64K ctx |
+| `EDGE_MTP_DRAFT` | auto | MTP draft model path; blank = auto-find under sibling `MTP/` |
 | `EDGE_LOG_LEVEL` | `INFO` | Log level: `DEBUG` / `INFO` / `WARNING` |
 | `EDGE_DIAG_BOOT` | `0` | `1` = write a diagnostics bundle at startup |
 
