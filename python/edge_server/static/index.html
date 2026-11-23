@@ -1363,15 +1363,16 @@ async function bootService(){
   $("chipSvc").textContent="正在启动…"; $("chipSvc").className="chip";
   if(await probeAPI()){ loadHealth(); loadDeviceChip(); return; }
   if(IS_TAURI){
-    txt.textContent="正在启动推理服务（首次加载模型较慢）…";
-    askTauriStart();
-    for(let i=0;i<50;i++){
-      await new Promise(r=>setTimeout(r,2000));
+    let asked=false;
+    for(let i=0;i<60;i++){          // 最多 ~30s（每 500ms 一次），快速反馈
+      await new Promise(r=>setTimeout(r,500));
       if(await probeAPI()){ loadHealth(); loadDeviceChip(); toast("推理服务已就绪"); return; }
+      if(i===4 && !asked){ asked=true; txt.textContent="正在启动推理服务…"; askTauriStart(); }
+      if(i%10===9) txt.textContent=`正在启动推理服务…（${Math.round((i+1)/2)}s）`;
     }
   }
   dot.style.background="var(--err)";
-  txt.innerHTML='服务未运行 · <span style="color:var(--brand);cursor:pointer" onclick="bootService()">点此重试</span>';
+  txt.innerHTML='服务未连接 · <span style="color:var(--brand);cursor:pointer" onclick="bootService()">点此重试</span>';
   $("chipSvc").textContent="未连接"; $("chipSvc").className="chip off";
 }
 </script>
