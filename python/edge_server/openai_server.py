@@ -952,6 +952,11 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     kv_q = os.environ.get("EDGE_KV_QUANT", "")
     if not kv_q:
         kv_q = "q8_0" if ctx_size >= 65536 else ""
+    # Big contexts cannot fit KV alongside a 66 GB MoE on 8 GB VRAM — keep KV
+    # in host RAM (measured: 256K at q8_0 still needs ~1.8 GB VRAM otherwise).
+    kv_offload = os.environ.get("EDGE_KV_OFFLOAD", "auto").lower() not in ("0", "off", "false")
+    if os.environ.get("EDGE_KV_OFFLOAD", "auto").lower() == "auto":
+        kv_offload = ctx_size < 65536
 
     # MTP draft head (speculative decoding). Set EDGE_MTP_DRAFT to a path, or
     # leave it auto: for a split model we look for a sibling ``MTP/`` folder and
@@ -965,13 +970,14 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     if not _llama.running() or (_llama._cfg and (
             _llama._cfg.model_path != gguf_path or _llama._cfg.reasoning != want_think
             or _llama._cfg.kv_quant != kv_q or _llama._cfg.ctx != ctx_size
+            or _llama._cfg.kv_offload != kv_offload
             or _llama._cfg.draft_path != draft_path)):
         # NVIDIA → offload everything to CUDA (discrete VRAM). MoE layers can be
         # pushed to CPU/RAM via EDGE_N_CPU_MOE when the model exceeds VRAM.
         n_cpu_moe = int(os.environ.get("EDGE_N_CPU_MOE", "0") or 0)
         _llama.load(LlamaConfig(model_path=gguf_path, port=8081,
                                 n_cpu_moe=n_cpu_moe, reasoning=want_think,
-                                kv_quant=kv_q, ctx=ctx_size,
+                                kv_quant=kv_q, kv_offload=kv_offload, ctx=ctx_size,
                                 draft_path=draft_path))
 
     msgs = []

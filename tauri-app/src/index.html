@@ -408,7 +408,13 @@ async function loadProfile(){
 function renderSuperMode(){
   const btn=$("superModeBtn"); if(!btn) return;
   const sm=state.profile?.super_model;
-  if(!sm){ btn.disabled=true; btn.textContent="⚡ 超级模型"; btn.title="硬件信息不可用"; return; }
+  if(!sm){
+    // Profile is fetched asynchronously right after /health; don't show a
+    // misleading "unsupported" during that ~1s window.
+    btn.disabled=true; btn.classList.remove("on");
+    btn.textContent="⚡ 检测硬件中…"; btn.title="正在检测 N 卡 / SSD / 内存容量";
+    return;
+  }
   if(sm.available){
     btn.disabled=false; btn.title="启用 "+sm.model+" · 上下文 "+Math.round(sm.context/1024)+"K";
     btn.textContent=state.superMode?"⚡ 超级模型 · 开":"⚡ 超级模型";
@@ -420,9 +426,16 @@ function renderSuperMode(){
     btn.textContent="⚡ 超级模型（不可用）";
   }
 }
-function toggleSuperMode(){
-  const sm=state.profile?.super_model;
-  if(!sm||!sm.available){ toast("硬件不满足超级模型模式要求"); return; }
+async function toggleSuperMode(){
+  // If the user clicks before the async profile arrives, wait for it instead
+  // of falsely reporting "hardware unsupported".
+  let sm=state.profile?.super_model;
+  if(!sm){
+    toast("正在检测硬件，请稍候…");
+    await loadProfile();
+    sm=state.profile?.super_model;
+  }
+  if(!sm||!sm.available){ toast("硬件不满足超级模型模式要求："+(sm?.reason||"检测失败")); return; }
   state.superMode=!state.superMode;
   if(state.superMode){
     // 选旗舰模型；上下文通过请求的 ctx 字段传给后端
@@ -724,6 +737,12 @@ async function send(){
   const thinkingOn = state.thinking;  // 本次请求是否开启思考
 
   try{
+    // Super mode's 66 GB model + 256K context can take ~75s to load on first
+    // use. Tell the user up front so a long pause does not look like a hang.
+    if(state.superMode && !state._superWarmed){
+      toast("⚡ 正在加载超级模型（首次约需 1-2 分钟），请稍候…");
+      state._superWarmed=true;
+    }
     if(state.agentMode){
       meta.innerHTML='<span class="runstatus">Agent 运行中…</span>';
       const r=await fetch(API+"/agent/chat",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -751,7 +770,7 @@ async function send(){
           try{ const j=JSON.parse(data);
             if(j.usage) usage=j.usage;
             if(j.notice) toast(j.notice);
-            if(j.error) toast("推理错误："+j.error);
+            if(j.error){ body.classList.remove("cursor"); body.textContent="推理失败："+j.error; toast("推理错误："+j.error); }
             const d=j.choices?.[0]?.delta?.content;
             if(d){ text+=splitThink(d); paintThink(); body.textContent=text; scroll(); }
           }catch(e){}

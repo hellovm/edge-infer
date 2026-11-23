@@ -127,6 +127,7 @@ class LlamaConfig:
     threads: int = 0             # 0 -> auto
     reasoning: bool = False      # Qwen3 thinking; off by default for chat
     kv_quant: str = ""           # "" | q8_0 | q4_0 ... (applied to K and V)
+    kv_offload: bool = True      # put KV cache on GPU; False -> host RAM (large ctx)
     draft_path: str = ""         # MTP draft head (enables speculative decoding)
     spec_n_max: int = 2          # draft tokens per step (2 measured best here)
     extra_args: tuple = ()       # escape hatch for arch-specific flags
@@ -195,6 +196,11 @@ class LlamaBackend:
         if cfg.kv_quant:
             # KV 量化是大上下文的关键（256K × f16 会吃掉数 GB 显存）。
             args += ["-ctk", cfg.kv_quant, "-ctv", cfg.kv_quant]
+        if not cfg.kv_offload:
+            # Large context on a small VRAM card: keep KV in host RAM instead
+            # of failing cudaMalloc. Measured: 256K needs ~1.8 GB even at q8_0,
+            # which does not fit alongside a 66 GB MoE on an 8 GB card.
+            args += ["--no-kv-offload"]
 
         # MTP speculative decoding: a small draft head proposes tokens that the
         # target verifies in one pass (lossless). Measured ~+17% decode here;
@@ -221,9 +227,19 @@ class LlamaBackend:
         kwargs = {"env": env}
         if os.name == "nt":
             kwargs["creationflags"] = 0x0800_0000  # CREATE_NO_WINDOW
-        self._proc = subprocess.Popen(
-            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs
-        )
+        # Capture llama-server output: a failed load (e.g. cudaMalloc OOM at
+        # 256K context) must be diagnosable instead of silently dying.
+        log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), "logs", "llama-server.log")
+        try:
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            log_f = open(log_path, "w", encoding="utf-8", errors="replace")
+            kwargs["stdout"] = log_f
+            kwargs["stderr"] = subprocess.STDOUT
+        except OSError:
+            kwargs["stdout"] = subprocess.DEVNULL
+            kwargs["stderr"] = subprocess.DEVNULL
+        self._proc = subprocess.Popen(args, **kwargs)
         self._cfg = cfg
 
         # Wait until /health reports 200 (llama-server answers 503 while the
