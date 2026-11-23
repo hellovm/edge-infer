@@ -72,6 +72,33 @@ MODELS: List[dict] = [
                     "note": "投机解码 draft head（无损，实测 +17% decode）；ctx≥64K 自动关闭以省显存",
                 },
             },
+            # ------------------------------------------------------------------
+            # "agention" variant: the 1-bit Gyro-S quant that actually FITS in
+            # 32 GB RAM (weights 29.7 GB, no separate engram shard → nothing is
+            # read from SSD per token). It needs AgentionAI's llama.cpp fork
+            # (APR rotor kernels); stock llama.cpp cannot load it. The GUI/API
+            # auto-selects this engine in super-model mode.
+            # ------------------------------------------------------------------
+            "nvidia-agention": {
+                "repo": "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF",
+                "quant": "GGUF Gyro-S TQ1_0 (1-bit, APR)",
+                "backend": "AgentionAI llama.cpp (CUDA)",
+                "engine": "agention",
+                "size_gb": 29.7,
+                "weights_gb": 29.7,
+                "ram_hint": "≥ 32 GB 内存：权重全驻内存，无需每 token 读盘（速度档）",
+                "min_ssd_gb": 32,
+                # -noPLE = no PLE/engram table → nothing extra on SSD.
+                # The draft ships at the repo root (Agention layout).
+                "files": ["*Gyro-S-TQ1_0-noPLE.gguf", "*mmproj-F16.gguf",
+                          "mtp-Qwen3.8-Flash-Next-draft.gguf"],
+                "draft": {
+                    "file": "mtp-Qwen3.8-Flash-Next-draft.gguf",
+                    "quant": "MTP draft (Qwen3.8-Flash-Next-draft)",
+                    "size_gb": 2.7,
+                    "note": "AgentionAI 官方 MTP draft；ctx≥64K 自动关闭",
+                },
+            },
         },
     },
     # ------------------------------------------------------------------ Qwen3.6-35B-A3B
@@ -178,6 +205,7 @@ MODELS: List[dict] = [
 # GUI / API device keys → display label
 DEVICE_LABELS = {
     "nvidia": "NVIDIA GPU",
+    "nvidia-agention": "NVIDIA GPU · Agention 引擎",
     "intel-gpu": "Intel GPU",
     "npu": "Intel NPU",
 }
@@ -215,3 +243,26 @@ def resolve_device(device: Optional[str]) -> Optional[str]:
     if d == "NPU":
         return "npu"
     return None
+
+
+# Engine ids understood by the llama.cpp launcher.
+ENGINE_UPSTREAM = "upstream"    # stock/unsloth llama.cpp (default)
+ENGINE_AGENTION = "agention"    # AgentionAI fork — required for TQ1_0/APR GGUFs
+
+
+def variant_for_engine(model_name: str, engine: str) -> Optional[dict]:
+    """Return the catalog variant matching a given engine (NVIDIA path only).
+
+    Super-model mode uses ``ENGINE_AGENTION`` to auto-pick the 1-bit Gyro-S
+    quant, which fits fully in 32 GB RAM. Falls back to the plain ``nvidia``
+    variant when no engine-specific entry exists.
+    """
+    for m in MODELS:
+        if m["name"] != model_name:
+            continue
+        for dev, v in m["variants"].items():
+            if v.get("engine") == engine:
+                return {**v, "device": dev}
+        return {**m["variants"].get("nvidia", {}), "device": "nvidia"} or None
+    return None
+

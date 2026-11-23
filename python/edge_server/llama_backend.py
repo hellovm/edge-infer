@@ -37,14 +37,41 @@ _LLAMA_DIRS = [
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "tools", "llama"),
 ]
 
+# Engine → extra binary search dirs. The AgentionAI fork (APR rotor kernels,
+# required by the TQ1_0 Gyro GGUFs) lives in its own folder so both engines can
+# coexist. A per-engine env var overrides the default locations.
+_ENGINE_LLAMA_DIRS = {
+    "agention": [
+        os.environ.get("EDGE_LLAMA_AGENTION_DIR", ""),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "tools", "llama-agention"),
+        r"D:\AI\tools\llama-agention",
+    ],
+}
 
-def find_llama_server() -> Optional[str]:
-    """Locate ``llama-server.exe`` (or ``llama-server`` on POSIX)."""
+
+def find_llama_server(engine: str = "upstream") -> Optional[str]:
+    """Locate ``llama-server.exe`` for a given engine.
+
+    ``engine="upstream"`` (default) → stock/unsloth build.
+    ``engine="agention"``          → AgentionAI fork (TQ1_0/APR models).
+    Falls back to the upstream search when the engine-specific dirs are empty,
+    so a missing fork degrades gracefully instead of hard-failing.
+    """
     name = "llama-server.exe" if os.name == "nt" else "llama-server"
-    for d in _LLAMA_DIRS:
+    dirs = list(_ENGINE_LLAMA_DIRS.get(engine, [])) + _LLAMA_DIRS
+    for d in dirs:
         if d and os.path.isfile(os.path.join(d, name)):
             return os.path.join(d, name)
     return shutil.which("llama-server") or shutil.which("llama-server.exe")
+
+
+def engine_available(engine: str) -> bool:
+    """True when the engine's own binary (not the fallback) is present."""
+    name = "llama-server.exe" if os.name == "nt" else "llama-server"
+    for d in _ENGINE_LLAMA_DIRS.get(engine, []):
+        if d and os.path.isfile(os.path.join(d, name)):
+            return True
+    return False
 
 
 def llama_available() -> bool:
@@ -140,6 +167,7 @@ class LlamaConfig:
     # page cache can't evict them mid-generation (Strata's `resident-budget`;
     # measured +20% decode when set). 0 = no explicit cap.
     resident_budget_mib: int = 0
+    engine: str = "upstream"     # llama.cpp engine: "upstream" | "agention"
     extra_args: tuple = ()       # escape hatch for arch-specific flags
 
     def resolved_draft(self) -> str:
@@ -182,11 +210,21 @@ class LlamaBackend:
             return
         self.stop()
 
-        exe = find_llama_server()
+        exe = find_llama_server(cfg.engine)
         if not exe:
             raise RuntimeError(
                 "未找到 llama-server；请从 llama.cpp Releases 下载对应后端的"
                 " Windows 预编译包，解压到 tools/llama/ 或设置 EDGE_LLAMA_DIR"
+            )
+        if cfg.engine == "agention" and not engine_available("agention"):
+            # Stock llama.cpp cannot load TQ1_0/APR GGUFs — running them on the
+            # upstream binary would fail with an obscure tensor error, so fail
+            # fast with an actionable message instead.
+            raise RuntimeError(
+                "Agention 引擎未安装：TQ1_0/Gyro 模型需要 AgentionAI 的 llama.cpp "
+                "fork（APR 内核），stock llama.cpp 无法加载。请将 fork 的预编译包"
+                "解压到 tools/llama-agention/，或设置 EDGE_LLAMA_AGENTION_DIR；"
+                "也可退出超级模式改用 upstream 引擎的 UD-IQ1_S 量化。"
             )
 
         # Architecture-aware flags: qwen4exp needs LLAMA_ATTN_ROT_DISABLE=1 and
@@ -255,6 +293,13 @@ class LlamaBackend:
             # Keeps the reasoning channel from consuming the whole max_tokens
             # (observed on qwen4exp: a 24-token budget produced an empty answer).
             args += ["--no-reasoning-preserve"]
+
+        # AgentionAI fork: the TQ1_0 Gyro GGUFs need the Jinja chat template and
+        # a direct on-disk reader for the n-gram table (their recommended
+        # settings). Both flags are fork-specific; the upstream build ignores
+        # unknown flags only if passed here by mistake, so guard on engine.
+        if cfg.engine == "agention":
+            args += ["--jinja", "--ngram-on-disk"]
 
         args += arch_extra
         args += list(cfg.extra_args)

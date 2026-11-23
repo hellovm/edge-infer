@@ -154,6 +154,21 @@ Prefill = 提示词处理，decode = 稳态生成。
 > 由 mmap 常驻 SSD、不计入内存）。量化越小 → 每 token 读盘越少 → 越接近
 > 「专家常驻内存、CPU 就地算」的理想形态。
 
+#### 可选引擎：Agention fork（极速档）
+
+超级模型模式会**自动切换**到 AgentionAI 的 llama.cpp fork（APR 内核），运行
+**Gyro-S TQ1_0** 量化（权重 29.7 GB）——这是唯一能把全部权重装进 32 GB 内存的档位，
+专家常驻内存、无需每 token 读盘。启用方式：
+
+1. 下载 Agention fork 的预编译包，解压到 `tools/llama-agention/`
+   （或设 `EDGE_LLAMA_AGENTION_DIR` 指向该目录）；
+2. 在「模型」页下载 `agentionai/Qwen3.8-Flash-Next-Gyro-GGUF`
+   （`*Gyro-S-TQ1_0-noPLE.gguf` + mmproj + draft，共约 33 GB）；
+3. 打开超级模式 —— 引擎、模型、MTP draft 自动就位。
+
+两个引擎可共存：普通模式继续用 stock/unsloth 构建（UD-IQ1_S），
+fork 只在超级模式/显式 `engine:"agention"` 时启用。
+
 **MTP 投机解码对比**（同一真实任务，`-c 4096 -n 192`，各测 2 次取稳）：
 
 | 主模型 | 无 MTP | + MTP（shared draft，n-max 2） | 提升 |
@@ -570,6 +585,8 @@ OpenVINO 的 GPU / NPU 插件为 Intel 专属，无法驱动 AMD XDNA NPU，
 | `EDGE_FLASH_ATTN` | `1` | Flash Attention（加速注意力，KV 量化前提）；`0` 关闭 |
 | `EDGE_MOE_CACHE_MIB` | `0` | GPU 专家缓存大小（MiB）；`0` = 交给引擎。⚠️ 上游实测可能损失约 10% |
 | `EDGE_RESIDENT_BUDGET_MIB` | `0` | 限制引擎钉住的内存专家量（MiB），防被系统页缓存抢占；`0` = 不限 |
+| `EDGE_LLAMA_ENGINE` | 自动 | llama.cpp 引擎：`upstream`（stock/unsloth）或 `agention`（TQ1_0 专用 fork）。请求传 `engine` 字段可按次覆盖；**超级模式自动切 agention** |
+| `EDGE_LLAMA_AGENTION_DIR` | 自动 | Agention fork 二进制目录（默认依次找 `tools/llama-agention/`、`D:\AI\tools\llama-agention`） |
 | `EDGE_MTP_DRAFT` | 自动 | MTP draft 模型路径；留空则自动在同级 `MTP/` 目录查找（ctx≥64K 自动关闭） |
 | `EDGE_LOG_LEVEL` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARNING` |
 | `EDGE_DIAG_BOOT` | `0` | `1` = 启动时自动生成诊断包 |

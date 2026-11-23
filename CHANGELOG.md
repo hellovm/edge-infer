@@ -15,6 +15,13 @@
 - **启用 Flash Attention**（`-fa on`）：加速注意力，且是 KV 量化的前提。
 
 ### 新增
+- **可选引擎：Agention fork（极速档）**：新增对 AgentionAI llama.cpp fork 的支持，
+  运行 **Gyro-S TQ1_0**（权重 29.7 GB，唯一能全进 32 GB 内存的档位，专家常驻内存）。
+  两个引擎可共存（`tools/llama-unsloth/` + `tools/llama-agention/`）；
+  **超级模型模式自动切换**到 agention 引擎 + Gyro 模型 + 根目录 MTP draft。
+  引擎解析优先级：请求 `engine` 字段 > `EDGE_LLAMA_ENGINE` > 按模型路径自动检测；
+  fork 未安装时明确报错（而非用 stock 二进制加载 TQ1_0 后晦涩崩溃）。
+  相关变量：`EDGE_LLAMA_ENGINE` / `EDGE_LLAMA_AGENTION_DIR`。
 - **三层卸载 · 高级调参（设置页）**：
   - **GPU 专家缓存**（`--moe-cache-mib`）：把高频专家钉在显存，对标 Strata 专家缓存。
     ⚠️ 上游实测会图分裂、即便全装下也可能损失约 10%，故默认关闭、按需开启。

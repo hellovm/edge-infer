@@ -61,6 +61,10 @@ class SuperModelMode:
     context: int
     requirements: Dict[str, Any]
     exploration: Optional[Dict[str, Any]] = None
+    # Which llama.cpp engine + model dir super mode should use. Set to the
+    # AgentionAI fork + its 1-bit Gyro-S quant, whose weights fit in 32 GB RAM.
+    engine: str = "agention"
+    model_id: str = "qwen3.8-flash-next-gyro-gguf"
 
 
 def classify_ram(total_gb: float) -> str:
@@ -198,10 +202,15 @@ def super_model_mode(
         available=not failed,
         reason=("满足全部条件：N 卡独显 + SSD + ≥32G 内存" if not failed
                 else "未满足：" + "、".join(failed)),
-        model="Qwen3.8-Flash-Next (UD-Q2_0 + MTP)",
+        model="Qwen3.8-Flash-Next (Gyro-S TQ1_0 · Agention 引擎)",
         context=SUPER_MODEL_TARGET_CTX if not failed else 0,
         requirements=req,
     )
+    # Super mode uses the 1-bit Gyro-S quant on the AgentionAI fork: its 29.7 GB
+    # weights fully fit in 32 GB RAM (nothing read from SSD per token).
+    base.engine = "agention"
+    # Download dir name derives from repo "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF".
+    base.model_id = "qwen3.8-flash-next-gyro-gguf"
 
     # Exploration: NVIDIA + SSD + 16 GB. Can it still run the model?
     if failed and has_nvidia and ssd_read_gb_s >= SUPER_MODEL_MIN_SSD_GB_S \

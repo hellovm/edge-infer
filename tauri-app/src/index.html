@@ -365,6 +365,7 @@ const state={health:null,convs:LS.read("convs",[]),curConv:null,busy:false,
   device:LS.read("device","auto"),stream:LS.read("stream",true),
   thinking:LS.read("thinking",false),agentMode:LS.read("agentMode",false),
   mtp:LS.read("mtp",true),
+  engine:LS.read("engine","upstream"),
   superMode:false, profile:null,
   modelId:LS.read("modelId",null),
   showArchived:false, attachments:[]};
@@ -438,11 +439,20 @@ async function toggleSuperMode(){
   if(!sm||!sm.available){ toast("硬件不满足超级模型模式要求："+(sm?.reason||"检测失败")); return; }
   state.superMode=!state.superMode;
   if(state.superMode){
-    // 选旗舰模型；上下文通过请求的 ctx 字段传给后端
-    state.modelId="qwen3.8-flash-next-gguf"; LS.write("modelId",state.modelId);
+    // 超级模型走 Agention 引擎（1-bit Gyro-S，权重 29.7GB 全进内存）
+    state.modelId = sm.model_id || "qwen3.8-flash-next-gyro-gguf";
+    state.engine = sm.engine || "agention";
+    LS.write("modelId",state.modelId);
     if(typeof refreshModelPick==="function") refreshModelPick();
-    toast("⚡ 超级模型模式：Qwen3.8-Flash-Next · 256K 上下文");
+    toast("⚡ 超级模型模式：Qwen3.8-Flash-Next · Agention 引擎 · 256K 上下文");
+    // 模型未下载时提前提示（避免聊天时报错）
+    try{
+      const ms=await (await fetch(API+"/edge/models")).json();
+      const hit=(ms.models||[]).find(d=>d.id===state.modelId&&d.state==="ready");
+      if(!hit) toast("⚠️ 旗舰模型尚未下载：请到「模型」页下载 Gyro-S TQ1_0（29.7 GB）",4000);
+    }catch(e){}
   }else{
+    state.engine = "upstream"; LS.write("engine","upstream");
     toast("已退出超级模型模式");
   }
   renderSuperMode();
@@ -757,6 +767,7 @@ async function send(){
         device:state.device,enable_thinking:state.thinking,web_search:!!state.webSearch,mtp:state.mtp,
         ctx: state.superMode ? 262144 : 65536,
         moe_cache_mib: state.moeCacheMib||0, resident_budget_mib: state.residentBudgetMib||0,
+        engine: state.engine||"upstream",
         attachments:atts.filter(a=>a.kind!=="image").map(a=>({name:a.name,content:a.content})),
         images:atts.filter(a=>a.kind==="image"&&a.image).map(a=>a.image)};
       const resp=await fetch(API+"/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
@@ -792,8 +803,10 @@ async function send(){
       }else{
         url=API+"/v1/chat/completions";
         payload={model:"qwen",model_id:state.modelId,messages:[{role:"user",content:t}],max_tokens:512,temperature:0,
-          device:state.device,enable_thinking:state.thinking,web_search:!!state.webSearch,
+          device:state.device,enable_thinking:state.thinking,web_search:!!state.webSearch,mtp:state.mtp,
+          ctx: state.superMode ? 262144 : 65536,
           moe_cache_mib: state.moeCacheMib||0, resident_budget_mib: state.residentBudgetMib||0,
+          engine: state.engine||"upstream",
           attachments:atts.filter(a=>a.kind!=="image").map(a=>({name:a.name,content:a.content})),
           images:atts.filter(a=>a.kind==="image"&&a.image).map(a=>a.image)};
       }

@@ -328,6 +328,9 @@ class ChatRequest(BaseModel):
     moe_cache_mib: Optional[int] = None
     # P2: cap resident-expert pinning in MiB (0 = no explicit cap).
     resident_budget_mib: Optional[int] = None
+    # llama.cpp engine: "upstream" (stock/unsloth) | "agention" (fork, required
+    # by TQ1_0/APR GGUFs). Super-model mode auto-selects "agention".
+    engine: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +358,17 @@ def list_models(authorization: Optional[str] = Header(default=None)):
 @app.get("/health")
 def health():
     gguf = _find_gguf(DEFAULT_MODEL_DIR) if os.path.isdir(DEFAULT_MODEL_DIR) else None
+    # llama.cpp engines available on this machine (upstream always, agention if
+    # its fork is installed). Super-model mode needs "agention"; the GUI shows
+    # a hint when it is missing.
+    engines = {"upstream": False, "agention": False}
+    try:
+        from .llama_backend import engine_available as _eng_avail, find_llama_server as _find_srv
+
+        engines["upstream"] = bool(_find_srv("upstream"))
+        engines["agention"] = bool(_eng_avail("agention"))
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "ok": True,
         "backend_available": _GEN_AVAILABLE,
@@ -368,6 +382,7 @@ def health():
             "llama_cpp": _LLAMA_AVAILABLE,
             "llama_cpp_running": bool(_llama and _llama.running()),
         },
+        "engines": engines,
         "gguf_model": gguf,
     }
 
@@ -971,6 +986,8 @@ def _auto_draft(gguf_path: str) -> str:
     Prefers a ``shared-`` head: it borrows the target's token embedding and
     output projection, so it is smaller and drafts faster than a self-contained
     copy. Falls back to any single ``.gguf`` there.
+    The AgentionAI Gyro repos ship the draft at the repo root
+    (``mtp-*-draft.gguf`` next to the weights), so that layout is checked too.
     """
     try:
         model_dir = os.path.dirname(os.path.abspath(gguf_path))
@@ -978,7 +995,10 @@ def _auto_draft(gguf_path: str) -> str:
         if not os.path.isdir(mtp_dir):
             mtp_dir = os.path.join(model_dir, "MTP")
         if not os.path.isdir(mtp_dir):
-            return ""
+            # Agention layout: draft sits beside the weights in the same dir.
+            root = [os.path.join(model_dir, f) for f in os.listdir(model_dir)
+                    if f.lower().startswith("mtp-") and f.lower().endswith(".gguf")]
+            return root[0] if root else ""
         cands = [os.path.join(mtp_dir, f) for f in os.listdir(mtp_dir)
                  if f.lower().endswith(".gguf") and "incomplete" not in f.lower()]
         if not cands:
@@ -1060,13 +1080,22 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
         resident_budget_mib = int(req.resident_budget_mib)
     flash_attn = os.environ.get("EDGE_FLASH_ATTN", "1").lower() not in ("0", "off", "false")
 
+    # llama.cpp engine selection. Priority: per-request > env > auto-detect.
+    # Auto: a TQ1_0/APR GGUF (AgentionAI Gyro) can ONLY be loaded by the
+    # AgentionAI fork, so detect it from the path and switch engines.
+    engine = getattr(req, "engine", None) or os.environ.get("EDGE_LLAMA_ENGINE", "") or ""
+    if not engine:
+        base = os.path.basename(gguf_path).lower()
+        engine = "agention" if ("tq1_0" in base or "gyro" in base) else "upstream"
+
     if not _llama.running() or (_llama._cfg and (
             _llama._cfg.model_path != gguf_path or _llama._cfg.reasoning != want_think
             or _llama._cfg.kv_quant != kv_q or _llama._cfg.ctx != ctx_size
             or _llama._cfg.kv_offload != kv_offload
             or _llama._cfg.draft_path != draft_path
             or _llama._cfg.moe_cache_mib != moe_cache_mib
-            or _llama._cfg.resident_budget_mib != resident_budget_mib)):
+            or _llama._cfg.resident_budget_mib != resident_budget_mib
+            or _llama._cfg.engine != engine)):
         # NVIDIA → offload everything to CUDA (discrete VRAM). MoE layers can be
         # pushed to CPU/RAM via EDGE_N_CPU_MOE when the model exceeds VRAM.
         n_cpu_moe = int(os.environ.get("EDGE_N_CPU_MOE", "0") or 0)
@@ -1075,7 +1104,8 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
                                 kv_quant=kv_q, kv_offload=kv_offload, ctx=ctx_size,
                                 draft_path=draft_path, flash_attn=flash_attn,
                                 moe_cache_mib=moe_cache_mib,
-                                resident_budget_mib=resident_budget_mib))
+                                resident_budget_mib=resident_budget_mib,
+                                engine=engine))
 
     msgs = []
     if system:
