@@ -296,6 +296,7 @@ class ChatRequest(BaseModel):
     device: Optional[str] = None          # override EDGE_DEVICE per request
     enable_thinking: bool = False         # Qwen3 thinking mode
     mtp: bool = True                      # enable MTP speculative decoding when a draft exists
+    ctx: Optional[int] = None             # context window override (super-model mode: 320K)
     attachments: List[dict] = []          # [{name, content}] inline text files
     images: List[str] = []                # [{data_url}] inline images (VLM)
     web_search: bool = False              # search the web and inject results
@@ -435,10 +436,36 @@ def edge_devices():
     want = DEFAULT_DEVICE
     if want == "NPU" and not _NPU_AVAILABLE:
         want = "CPU"
+    # Hardware profile: RAM class, offload strategy, super-model gating.
+    try:
+        from . import diagnostics as _diag
+        from .hardware_profile import build_profile as _build_profile
+
+        mem = _diag.probe_memory()
+        nv = _diag.probe_nvidia()
+        total_ram = float(mem.get("total_gb") or 0)
+        has_nv = bool(nv.get("available"))
+        vram_gb = 0.0
+        if has_nv and nv.get("gpus"):
+            raw = str(nv["gpus"][0].get("vram", ""))
+            nums = [c for c in raw.replace(",", "").split() if c.replace(".", "", 1).isdigit()]
+            if nums:
+                v = float(nums[0])
+                vram_gb = v / 1024 if "mib" in raw.lower() else v
+        # Offload strategy should describe the *capability* (N-card path when
+        # present), not the GUI's current OpenVINO device selection.
+        profile_device = "NVIDIA-GPU" if has_nv else want
+        profile = _build_profile(total_ram, has_nv, vram_gb,
+                                 float(ssd.read_gb_per_s or 0),
+                                 device=profile_device)
+    except Exception as _e:  # noqa: BLE001
+        profile = {"error": str(_e)[:200]}
+
     return {
         "openvino_devices": devs,
         "npu_available": _NPU_AVAILABLE,
         "npu_vendor": "Intel" if _NPU_AVAILABLE else None,
+        "profile": profile,
         "small_model_tier": {
             "device": want if want in devs else "CPU",
             "model": os.path.basename(DEFAULT_MODEL_DIR),
@@ -670,6 +697,10 @@ def edge_models():
     out = []
     if os.path.isdir(_MODELS_DIR):
         for name in sorted(os.listdir(_MODELS_DIR)):
+            # Hide scratch/temp directories (e.g. _trace_probe used for
+            # offline routing-data collection) from the product model list.
+            if name.startswith("_"):
+                continue
             d = os.path.join(_MODELS_DIR, name)
             if not os.path.isdir(d):
                 continue
@@ -908,9 +939,12 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     # Context window for the llama.cpp backend. env override lets users trade
     # RAM/VRAM for long context; default 32K keeps KV cache small.
     try:
-        ctx_size = int(os.environ.get("EDGE_CTX", "32768") or 32768)
+        ctx_size = int(os.environ.get("EDGE_CTX", "65536") or 65536)
     except ValueError:
-        ctx_size = 32768
+        ctx_size = 65536
+    # Per-request ctx: super mode 256K, all other modes 64K.
+    if getattr(req, "ctx", None):
+        ctx_size = int(req.ctx)
     ctx_size = max(512, min(ctx_size, 1048576))
     # KV cache quantisation: essential for very large contexts. 256K × f16 would
     # eat several GB; q8_0 roughly halves it at negligible quality cost. Only

@@ -8,6 +8,7 @@ description = "Prerouter one-step-ahead expert prediction + cross-tier overlappi
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 edge-tiers = { path = "../edge-tiers" }
 
 [lib]

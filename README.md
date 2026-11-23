@@ -2,7 +2,7 @@
 
 **在普通人的电脑上本地运行超大规模模型 · 高能效端侧推理平台**
 
-[![Version](https://img.shields.io/badge/version-0.3.0-2ea44f.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.1-2ea44f.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-个人免费%20·%20商用授权-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![OpenVINO](https://img.shields.io/badge/OpenVINO-2026.4-0091D5.svg)](https://docs.openvino.ai/)

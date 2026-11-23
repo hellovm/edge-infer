@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "edge-detect"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -12,7 +12,7 @@ dependencies = [
 
 [[package]]
 name = "edge-engine"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "edge-detect",
  "edge-prefetch",
@@ -23,15 +23,16 @@ dependencies = [
 
 [[package]]
 name = "edge-prefetch"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "edge-tiers",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "edge-tiers"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "thiserror",

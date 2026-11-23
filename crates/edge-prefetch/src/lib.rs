@@ -16,6 +16,11 @@
 use edge_tiers::{demote, ExpertPlacement, Tier};
 use serde::{Deserialize, Serialize};
 
+pub mod learned_cache;
+pub use learned_cache::{
+    adaptive_hit_rate, lru_hit_rate, plan_learned, CacheConfig, GhostHit, LearnedCache,
+};
+
 /// A single tier-to-tier transfer to issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrefetchOp {

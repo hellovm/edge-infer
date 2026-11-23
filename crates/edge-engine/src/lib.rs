@@ -10,7 +10,10 @@ mod tests;
 
 
 use edge_detect::{build_report, Device, DeviceClass, HardwareReport, ProbeInput};
-use edge_prefetch::{est_decode_tokens_per_s, plan as prefetch_plan, PrefetchPlan};
+use edge_prefetch::{
+    est_decode_tokens_per_s, plan as prefetch_plan, plan_learned, CacheConfig, LearnedCache,
+    PrefetchPlan,
+};
 use edge_tiers::{allocate, Allocation, Budget, ExpertPlacement, ModelParams, Tier};
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +32,22 @@ pub struct RunPlan {
     pub oom_fallback: bool,
     /// Human-readable summary lines for the GUI.
     pub summary: Vec<String>,
+    /// Learned-cache state, when the plan was built with one.
+    #[serde(default)]
+    pub cache: Option<CacheReport>,
+}
+
+/// Snapshot of the adaptive expert cache, for the GUI / diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheReport {
+    /// Current recency/frequency split (0 = pure frequency, 1 = pure recency).
+    pub recency_frac: f64,
+    /// Observed hit-rate EMA (0..1).
+    pub hit_rate: f64,
+    /// Total routed-expert lookups seen.
+    pub accesses: u64,
+    /// Experts currently tracked.
+    pub tracked_experts: usize,
 }
 
 /// Build a concrete `RunPlan` for a model.
@@ -174,7 +193,65 @@ pub fn build_run_plan(
         est_decode_tok_s: est,
         oom_fallback,
         summary,
+        cache: None,
     })
+}
+
+/// Like [`build_run_plan`], but drives the eviction side with the adaptive
+/// expert cache instead of "everything not predicted cools".
+///
+/// `observed` is the recent routing trace (expert indices in order, the most
+/// recent last); it warms the cache so the first planning step already has a
+/// learned hot set. Pass an empty slice for a cold start.
+#[allow(clippy::too_many_arguments)]
+pub fn build_run_plan_learned(
+    probe: &ProbeInput,
+    model: &ModelParams,
+    experts: &[ExpertPlacement],
+    predicted: &[u32],
+    observed: &[u32],
+    context: usize,
+    large_threshold: u64,
+    cache_cfg: CacheConfig,
+) -> Result<RunPlan, String> {
+    let mut plan = build_run_plan(probe, model, experts, predicted, context, large_threshold)?;
+
+    // Warm the cache on the recent trace, then re-plan evictions with it.
+    let capacity = plan
+        .allocation
+        .experts
+        .iter()
+        .filter(|e| e.tier != Tier::Ssd)
+        .count()
+        .max(1);
+    let mut cache = LearnedCache::with_capacity(cache_cfg, capacity);
+    for &e in observed {
+        cache.record(e, true);
+        cache.tick();
+    }
+
+    let vram_used = plan.allocation.vram_used_bytes;
+    let ram_used = plan.allocation.ram_used_bytes;
+    plan.prefetch = plan_learned(
+        &cache,
+        &mut plan.allocation.experts,
+        predicted,
+        vram_used,
+        ram_used,
+        model.num_experts as usize,
+    );
+    plan.cache = Some(CacheReport {
+        recency_frac: cache.recency_frac(),
+        hit_rate: cache.hit_rate(),
+        accesses: cache.accesses(),
+        tracked_experts: capacity,
+    });
+    plan.summary.push(format!(
+        "学习型专家缓存：recency/frequency 自适应比重 {:.2}，已跟踪 {} 个专家",
+        cache.recency_frac(),
+        capacity
+    ));
+    Ok(plan)
 }
 
 fn fmt_bytes(b: u64) -> String {

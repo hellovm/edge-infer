@@ -143,6 +143,9 @@
   .modellist .mm .bk{font-size:9.5px;padding:1px 5px;border-radius:5px;background:var(--panel2);color:var(--dim)}
   .hint{font-size:11.5px;color:var(--dim);margin-top:9px;display:flex;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap}
   .hint label{cursor:pointer;display:inline-flex;align-items:center;gap:5px}
+  .supermode{font-size:11px;padding:3px 9px;border-radius:14px;border:1px solid var(--line);background:transparent;color:var(--dim);cursor:pointer;transition:all .15s}
+  .supermode:disabled{opacity:.42;cursor:not-allowed}
+  .supermode.on{background:var(--nvidia);color:#fff;border-color:var(--nvidia)}
 
   /* ---------- panels (overlay) ---------- */
   .overlay{position:fixed;inset:0;background:rgba(16,24,40,.35);display:none;z-index:60;align-items:flex-start;justify-content:center;padding:40px 20px;overflow:auto}
@@ -298,6 +301,7 @@
               <label><input type="checkbox" id="thinkOn"> 思考模式</label>
               <label><input type="checkbox" id="agentOn"> Agent 模式</label>
               <label><input type="checkbox" id="webOn"> 🌐 联网搜索</label>
+              <button class="supermode" id="superModeBtn" onclick="toggleSuperMode()" title="检测中…">⚡ 超级模型</button>
               <span id="statLine" class="mono"></span>
             </div>
           </div>
@@ -361,6 +365,7 @@ const state={health:null,convs:LS.read("convs",[]),curConv:null,busy:false,
   device:LS.read("device","auto"),stream:LS.read("stream",true),
   thinking:LS.read("thinking",false),agentMode:LS.read("agentMode",false),
   mtp:LS.read("mtp",true),
+  superMode:false, profile:null,
   modelId:LS.read("modelId",null),
   showArchived:false, attachments:[]};
 
@@ -384,6 +389,7 @@ async function loadHealth(){
     $("chipSvc").className="chip "+(j.backend_available?"on":"off");
     $("footDot").style.background=j.backend_available?"var(--ok)":"var(--err)";
     $("footText").textContent=j.generator_ready?("运行中 · "+j.device):"服务已连接";
+    loadProfile();
   }catch(e){
     // 可能是 API 地址失效（例如页面源变了），重新探测一次
     if(await probeAPI()){ return loadHealth(); }
@@ -391,6 +397,42 @@ async function loadHealth(){
     $("footDot").style.background="var(--err)";
     $("footText").innerHTML='服务未连接 · <span style="color:var(--brand);cursor:pointer" onclick="bootService()">点此重试</span>';
   }
+}
+async function loadProfile(){
+  try{
+    const j=await (await fetch(API+"/edge/devices")).json();
+    state.profile=j.profile||null;
+    renderSuperMode();
+  }catch(e){ renderSuperMode(); }
+}
+function renderSuperMode(){
+  const btn=$("superModeBtn"); if(!btn) return;
+  const sm=state.profile?.super_model;
+  if(!sm){ btn.disabled=true; btn.textContent="⚡ 超级模型"; btn.title="硬件信息不可用"; return; }
+  if(sm.available){
+    btn.disabled=false; btn.title="启用 "+sm.model+" · 上下文 "+Math.round(sm.context/1024)+"K";
+    btn.textContent=state.superMode?"⚡ 超级模型 · 开":"⚡ 超级模型";
+    btn.classList.toggle("on",state.superMode);
+  }else{
+    btn.disabled=true; btn.classList.remove("on");
+    const ex=sm.exploration;
+    btn.title=sm.reason+(ex?("\n\n"+ex.headline):"");
+    btn.textContent="⚡ 超级模型（不可用）";
+  }
+}
+function toggleSuperMode(){
+  const sm=state.profile?.super_model;
+  if(!sm||!sm.available){ toast("硬件不满足超级模型模式要求"); return; }
+  state.superMode=!state.superMode;
+  if(state.superMode){
+    // 选旗舰模型；上下文通过请求的 ctx 字段传给后端
+    state.modelId="qwen3.8-flash-next-gguf"; LS.write("modelId",state.modelId);
+    if(typeof refreshModelPick==="function") refreshModelPick();
+    toast("⚡ 超级模型模式：Qwen3.8-Flash-Next · 256K 上下文");
+  }else{
+    toast("已退出超级模型模式");
+  }
+  renderSuperMode();
 }
 async function loadDeviceChip(){
   try{ const j=await (await fetch(API+"/edge/device/current")).json();
@@ -537,9 +579,29 @@ function removeAtt(i){ state.attachments.splice(i,1); renderAtts(); }
 function fmtSize(n){ return n==null?"":(n<1024?n+" B":n<1048576?(n/1024).toFixed(0)+" KB":(n/1048576).toFixed(1)+" MB"); }
 
 let MODELS=[];
+// 目录名 -> 用户友好显示名（去掉 gguf/ov/int4 等实现后缀）
+const MODEL_NAMES={
+  "qwen3.8-flash-next-gguf":"Qwen3.8 Flash Next",
+  "qwen3-next-80b-a3b-instruct-gguf":"Qwen3 Next 80B",
+  "qwen3-8b-gguf":"Qwen3 8B", "qwen3-8b-int4-cw-ov":"Qwen3 8B",
+  "minicpm-v-4_5-gguf":"MiniCPM-V 4.5", "minicpm-v-4_5-int4-cw-ov":"MiniCPM-V 4.5",
+};
+const SUPER_MODEL_ID="qwen3.8-flash-next-gguf";
+function isSuperModelId(id){ return id===SUPER_MODEL_ID; }
+function friendlyName(id){
+  if(MODEL_NAMES[id]) return MODEL_NAMES[id];
+  // 通用兜底：剥离实现后缀，保留模型主干名
+  return (id||"")
+    .replace(/-(gguf|int4-cw-ov|int4-ov|fp16|bf16)$/i,"")
+    .replace(/-instruct$/i,"")
+    .replace(/_/g,".")
+    .replace(/-/g," ");
+}
 async function loadModelsForPicker(){
   try{ const j=await (await fetch(API+"/edge/models")).json(); MODELS=j.models||[]; }
   catch(e){ MODELS=[]; }
+  // 过滤临时/非产品模型（如路由采集用的 _trace_probe）
+  MODELS=MODELS.filter(m=>!(m.id||"").startsWith("_"));
   // 只把「已就绪」的模型作为默认选中项
   const ready=MODELS.filter(m=>m.usable!==false);
   if(state.modelId && !ready.some(m=>m.id===state.modelId)) state.modelId=null;
@@ -557,9 +619,10 @@ function deviceBadge(m, full){
 }
 function refreshModelPick(){
   const m=modelById(state.modelId)||MODELS[0];
-  $("modelPickName").textContent = m? m.id : "默认模型";
+  const sup=m&&isSuperModelId(m.id);
+  $("modelPickName").textContent = m? (sup?"⚡ ":"")+friendlyName(m.id) : "默认模型";
   $("modelPickBackend").textContent = deviceBadge(m);
-  $("modelPickName").title = m? m.id : "";
+  $("modelPickName").title = m? (friendlyName(m.id)+" · "+m.id+(sup?" · 超级模型":"")) : "";
 }
 const DEV_ALIAS={"NVIDIA-GPU":"NVIDIA GPU","nvidia":"NVIDIA GPU","NPU":"NPU","npu":"NPU",
   "Intel-GPU":"Intel GPU","intel-gpu":"Intel GPU","CPU":"CPU","cpu":"CPU","auto":null};
@@ -588,15 +651,32 @@ function renderModelMenu(){
     const ok=fits(m);
     const badge=deviceBadge(m);
     const badgeFull=deviceBadge(m,true);
-    return `<div class="mm${m.id===state.modelId?" sel":""}" onclick="selectModel('${esc(m.id)}')" style="${ok?"":"opacity:.45"}">
-      <span>${m.kind==="gguf"?"🧩":m.kind==="vlm"?"🖼️":"🧠"}</span>
-      <span class="nm">${esc(m.id)}</span>
+    const sup=isSuperModelId(m.id);
+    const smOk=!!(state.profile?.super_model?.available);
+    // 超级模型在硬件不满足时仍可见但置灰，说明原因
+    const disabled=sup&&!smOk;
+    const tip=disabled?("硬件不足："+(state.profile?.super_model?.reason||"")):("支持设备："+badgeFull);
+    return `<div class="mm${m.id===state.modelId?" sel":""}" onclick="selectModel('${esc(m.id)}')" style="${ok&&!disabled?"":"opacity:.45"}">
+      <span>${sup?"⚡":m.kind==="vlm"?"🖼️":"🧠"}</span>
+      <span class="nm">${esc(friendlyName(m.id))}${sup?' <small style="color:var(--brand);font-size:10px">超级模型</small>':""}</span>
       <span class="sz">${m.size||""}</span>
-      <span class="bk" title="支持设备：${esc(badgeFull)}">${esc(badge)}</span>
+      <span class="bk" title="${esc(tip)}">${esc(badge)}</span>
     </div>`;
   }).join("");
 }
-function selectModel(id){ state.modelId=id; LS.write("modelId",id); refreshModelPick(); $("modelMenu").classList.remove("show"); toast("已选择模型："+id); }
+function selectModel(id){
+  state.modelId=id; LS.write("modelId",id);
+  // 选中超级模型 -> 自动开启超级模式（256K）；选其它 -> 回到 64K
+  const wantSuper=isSuperModelId(id);
+  if(wantSuper && !state.superMode && state.profile?.super_model?.available){
+    state.superMode=true; toast("⚡ 已开启超级模型模式 · 256K 上下文");
+  }else if(!wantSuper && state.superMode){
+    state.superMode=false;
+  }
+  refreshModelPick(); renderSuperMode();
+  $("modelMenu").classList.remove("show");
+  toast("已选择模型："+friendlyName(id));
+}
 function toggleModelMenu(e){ if(e) e.stopPropagation(); toggleModelMenuPane(); }
 
 async function send(){
@@ -656,6 +736,7 @@ async function send(){
     } else if(state.stream && !state.useExternal){
       const payload={model:"qwen",model_id:state.modelId,messages:[{role:"user",content:t}],max_tokens:512,temperature:0,stream:true,
         device:state.device,enable_thinking:state.thinking,web_search:!!state.webSearch,mtp:state.mtp,
+        ctx: state.superMode ? 262144 : 65536,
         attachments:atts.filter(a=>a.kind!=="image").map(a=>({name:a.name,content:a.content})),
         images:atts.filter(a=>a.kind==="image"&&a.image).map(a=>a.image)};
       const resp=await fetch(API+"/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
@@ -876,7 +957,7 @@ const PANELS={
         <div id="tierOut" class="mono" style="margin-top:10px;font-size:12px;white-space:pre-wrap;color:var(--dim);max-height:320px;overflow:auto"></div>
       </div>
       <div class="sec"><h3>关于</h3>
-        <div class="desc"><b>edge-infer · 端侧大模型推理平台 v0.3.0</b><br>
+        <div class="desc"><b>edge-infer · 端侧大模型推理平台 v0.3.1</b><br>
         目标：让普通人的电脑也能本地运行超大规模模型，并以高能效方式运行。<br>
         通过 SSD / 内存 / 显存三层卸载 + MTP 投机解码，180B 级 MoE 在 8 GB 显存、
         32 GB 内存的普通电脑上即可流畅对话。<br>

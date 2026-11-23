@@ -2,6 +2,24 @@
 
 记录每个版本面向用户的主要变化。
 
+## [0.3.1] - 2026-11-23
+
+**本版本主题：超级模型模式 + 按内存分级的卸载策略。**
+
+### 新增
+- **超级模型模式**：检测到独立 N 卡 + SSD + 32G 内存时自动可用，一键启用
+  Qwen3.8-Flash-Next 与 **256K 上下文**；硬件不足时按钮置灰并说明原因。
+- **模型清单整理**：模型只显示名称，不再出现 `-gguf` / `-ov` 等实现后缀；
+  超级模型在清单中带 ⚡ 标记，选中即开启超级模式。
+- **按内存分级的卸载策略**：区分 16G 与 32G 电脑的三层卸载配置
+  （ncmoe、KV 量化、上下文上限），并说明 iGPU / NPU 下的 RAM + SSD 加载策略。
+- **16G 探索评估**：16G + N 卡 + SSD 也能运行 Qwen3.8-Flash-Next，
+  但需降级（ncmoe=12、≤64K 上下文），界面会给出预期速度。
+
+### 改进
+- 非超级模式的上下文上限统一调整为 **64K**。
+- 模型清单隐藏临时/测试目录，只显示可正常使用的模型。
+
 ## [0.3.0] - 2026-11-22
 
 **本版本主题：让普通人的电脑也能本地运行超大规模模型，并以高能效方式运行。**
@@ -55,6 +73,7 @@
 - 本地 AI 工作台界面与 Tauri 原生窗口。
 - 本地 Agent 工具、联网搜索、ModelScope 模型下载。
 
+[0.3.1]: https://github.com/hellovm/edge-infer/releases/tag/v0.3.1
 [0.3.0]: https://github.com/hellovm/edge-infer/releases/tag/v0.3.0
 [0.2.1]: https://github.com/hellovm/edge-infer/releases/tag/v0.2.1
 [0.2.0]: https://github.com/hellovm/edge-infer/releases/tag/v0.2.0
