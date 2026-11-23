@@ -95,52 +95,6 @@ MODELS: List[dict] = [
             },
         },
     },
-    # ------------------------------------------------------------------ Qwen3-30B-A3B
-    {
-        "name": "Qwen3-30B-A3B",
-        "params": "30B",
-        "active": "3B",
-        "mm": False,
-        "note": "MoE · 激活仅 3B · NVIDIA 与 Intel 均可跑（各自原生后端）",
-        "variants": {
-            "nvidia": {
-                "repo": "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-GGUF",
-                "quant": "GGUF Q4_K_M",
-                "backend": "llama.cpp (CUDA)",
-                "size_gb": 18.6,
-                "ram_hint": "≥ 16 GB 内存；8 GB 显存 + 三层卸载",
-                "min_ssd_gb": 19,
-                "files": ["*Q4_K_M.gguf"],
-            },
-            "intel-gpu": {
-                "repo": "OpenVINO/Qwen3-30B-A3B-Instruct-2507-int4-ov",
-                "quant": "INT4",
-                "backend": "OpenVINO (GPU)",
-                "size_gb": 16.3,
-                "ram_hint": "≥ 16 GB 内存；Arc 核显共享系统内存，整机建议 32 GB",
-                "min_ssd_gb": 17,
-            },
-        },
-    },
-    # ------------------------------------------------------------------ Qwen3-Next-80B-A3B
-    {
-        "name": "Qwen3-Next-80B-A3B",
-        "params": "80B",
-        "active": "3B",
-        "mm": False,
-        "note": "超大规模 MoE · 本机显存装不下 → 三层卸载的核心场景（仅 GGUF）",
-        "variants": {
-            "nvidia": {
-                "repo": "lmstudio-community/Qwen3-Next-80B-A3B-Instruct-GGUF",
-                "quant": "GGUF Q4_K_M",
-                "backend": "llama.cpp (CUDA)",
-                "size_gb": 48.5,
-                "ram_hint": "≥ 16 GB 内存；约 50 GB SSD 承载全量；激活仅 3B，速度可控",
-                "min_ssd_gb": 50,
-                "files": ["*Q4_K_M.gguf"],
-            },
-        },
-    },
     # ------------------------------------------------------------------ Qwen3-8B
     {
         "name": "Qwen3-8B",

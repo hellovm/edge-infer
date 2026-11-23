@@ -200,7 +200,6 @@ Prefill = 提示词处理，decode = 稳态生成。
 |---|---|---|---|---|
 | **Qwen3.8-Flash-Next** ⭐ | 180B 存储 / 6B 激活 | llama.cpp CUDA · GGUF（UD-Q2_0）+ MTP | 65.7 + 1.8 GB | SSD + 内存 + 显存 |
 | **Qwen3.6-35B-A3B** | 35B-A3B · 多模态 | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 21.2 / 19.4 GB | SSD + 内存 + 显存 |
-| **Qwen3-30B-A3B** | 30B-A3B | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 18.6 / 16.3 GB | SSD + 内存 + 显存 |
 | **Qwen3-8B** | 8B | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 5.0 / 4.75 GB | SSD + 内存（+ 显存） |
 | **MiniCPM-V-4.5** | 9B · 多模态 | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 6.0 / 5.26 GB | SSD + 内存（+ 显存） |
 

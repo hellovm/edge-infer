@@ -595,7 +595,6 @@ let MODELS=[];
 // 目录名 -> 用户友好显示名（去掉 gguf/ov/int4 等实现后缀）
 const MODEL_NAMES={
   "qwen3.8-flash-next-gguf":"Qwen3.8 Flash Next",
-  "qwen3-next-80b-a3b-instruct-gguf":"Qwen3 Next 80B",
   "qwen3-8b-gguf":"Qwen3 8B", "qwen3-8b-int4-cw-ov":"Qwen3 8B",
   "minicpm-v-4_5-gguf":"MiniCPM-V 4.5", "minicpm-v-4_5-int4-cw-ov":"MiniCPM-V 4.5",
 };
@@ -949,9 +948,23 @@ const PANELS={
           <div class="frow"><div class="lbl">模型名</div><input type="text" id="extModel" placeholder="gpt-4o-mini"></div>
         </div>
       </div>
-      <div class="sec"><h3>OpenAI 兼容接口</h3>
-        <div class="frow"><div class="lbl">服务地址</div><span class="mono" id="apiBase">–</span></div>
-        <div class="frow"><div class="lbl">支持</div><span class="mono">/v1/chat/completions (stream=true)</span></div>
+      <div class="sec"><h3>OpenAI 兼容 API · 外部服务使用说明</h3>
+        <div class="desc">外部服务 / 任意 Agent 工作台可按 OpenAI 标准对接本项目的本地推理引擎。
+          填写下方三项，即可生成可复制的调用代码（curl / Python）。</div>
+        <div class="frow"><div class="lbl">Base URL<small>服务地址（含 /v1）</small></div>
+          <input type="text" id="apiUrl" class="btn" style="width:100%;margin-top:4px" spellcheck="false"></div>
+        <div class="frow"><div class="lbl">模型名（model_id）<small>选本地已下载的模型；留空用默认</small></div>
+          <input type="text" id="apiModel" class="btn" list="apiModelDl" style="width:100%;margin-top:4px" spellcheck="false">
+          <datalist id="apiModelDl"></datalist></div>
+        <div class="frow"><div class="lbl">上下文窗口（ctx）<small>普通模式默认 65536；超级模型填 262144</small></div>
+          <input type="number" id="apiCtx" value="65536" min="512" max="1048576" step="512" class="btn" style="width:140px"></div>
+        <div class="frow"><div class="lbl">API Key</div><span class="mono" id="apiKeyNote">未设置（本机免鉴权，跨网段请设 EDGE_API_KEY）</span></div>
+        <div class="desc" style="margin-top:12px">对话端点：<span class="mono" id="apiEndpoint">–</span>（支持 stream=true SSE 流式）</div>
+        <textarea id="apiExample" readonly rows="14" style="width:100%;margin-top:8px;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:10px;white-space:pre;resize:vertical"></textarea>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <button class="btn" id="apiExToggle" onclick="toggleApiExample()">切换到 Python 示例</button>
+          <button class="btn" onclick="copyApiExample()">复制代码</button>
+        </div>
       </div>
       <div class="sec"><h3>环境诊断</h3>
         <div class="desc">采集本机硬件 / 驱动 / 后端可用性快照，并记录加载与推理失败。
@@ -1172,11 +1185,66 @@ function initSettings(){
   $("extBase").value=state.ext.base||""; $("extKey").value=state.ext.key||""; $("extModel").value=state.ext.model||"";
   ["extBase","extKey","extModel"].forEach(id=>$(id).onchange=()=>{ state.ext={base:$("extBase").value,key:$("extKey").value,model:$("extModel").value}; LS.write("ext",state.ext); });
   $("swMtp").classList.toggle("on",state.mtp);
-  $("apiBase").textContent=API;
+  populateApiSection();
   renderDevGrid();
   loadDiagnostics();
   refreshProblemCount();
   loadTierModels();
+}
+
+// ---- 外部服务 OpenAI 兼容 API 使用说明 ----
+function _apiBaseUrl(){
+  // 本地服务地址（Tauri 壳 / 浏览器都会落到 127.0.0.1:8080；跨网段把 127.0.0.1 换成本机 IP）
+  const host=(API&&API.includes("127.0.0.1"))?API:(API||"http://127.0.0.1:8080");
+  return host.replace(/\/$/,"")+"/v1";
+}
+function populateApiSection(){
+  const url=$("apiUrl"), model=$("apiModel"), ctx=$("apiCtx");
+  if(!url) return;
+  if(!url.dataset.init){ url.value=_apiBaseUrl(); url.dataset.init="1"; }
+  if(!ctx.dataset.init){ ctx.dataset.init="1"; }
+  url.oninput=()=>{ url.dataset.init="1"; renderApiExample(); };
+  ctx.oninput=renderApiExample;
+  model.oninput=renderApiExample;
+  // 下拉候选：已下载的本地模型目录名（即 model_id 取值）
+  loadModelsForPicker().then(()=>{
+    const dl=$("apiModelDl"); if(dl) dl.innerHTML=MODELS.filter(m=>m.usable!==false)
+      .map(m=>`<option value="${esc(m.id)}">${esc(friendlyName(m.id))}（${esc(m.id)}）</option>`).join("");
+    if(model && !model.dataset.init && !model.value && MODELS.length) model.value=MODELS.find(m=>m.usable!==false)?.id||"";
+    renderApiExample();
+  });
+  renderApiExample();
+}
+function _apiExampleCurl(){
+  const base=$("apiUrl").value.trim().replace(/\/$/,"")||_apiBaseUrl();
+  const model=($("apiModel").value||"").trim();
+  const ctx=parseInt(($("apiCtx").value||"65536"),10)||65536;
+  const body={model:"edge-infer",messages:[{role:"user",content:"你好"}],stream:true,max_tokens:512,ctx:ctx};
+  if(model) body.model_id=model;
+  return `# Base URL（含 /v1）：${base}\n# 端点：POST ${base}/chat/completions\n# model_id 选本地模型目录名；ctx 上下文窗口（超级模型 262144）\n\ncurl -s ${base}/chat/completions -H 'Content-Type: application/json' -d '${JSON.stringify(body)}'`;
+}
+function _apiExamplePy(){
+  const base=$("apiUrl").value.trim().replace(/\/$/,"")||_apiBaseUrl();
+  const model=($("apiModel").value||"").trim();
+  const ctx=parseInt(($("apiCtx").value||"65536"),10)||65536;
+  const keyNote="未设置 EDGE_API_KEY 时可不带 Authorization";
+  return `# Base URL（含 /v1）：${base}   # ${keyNote}\nfrom openai import OpenAI\n\nclient = OpenAI(base_url="${base}", api_key="unused")\n# 用本地 OpenAI 兼容 SDK 时，把 model_id / ctx 通过 extra_body 传入：\nresp = client.chat.completions.create(\n    model="edge-infer",\n    messages=[{"role": "user", "content": "你好"}],\n    extra_body={"model_id": ${model?JSON.stringify(model):"null"}, "ctx": ${ctx}},\n    stream=True,\n)\nfor chunk in resp:\n    print(chunk.choices[0].delta.content or "", end="")`;
+}
+let _apiExMode="curl";
+function renderApiExample(){
+  const el=$("apiExample"); if(!el) return;
+  el.value = _apiExMode==="py" ? _apiExamplePy() : _apiExampleCurl();
+  const ep=$("apiEndpoint"); if(ep) ep.textContent=_apiBaseUrl()+"/chat/completions";
+}
+function toggleApiExample(){
+  _apiExMode = _apiExMode==="curl" ? "py" : "curl";
+  const b=$("apiExToggle"); if(b) b.textContent = _apiExMode==="py" ? "切换到 curl 示例" : "切换到 Python 示例";
+  renderApiExample();
+}
+async function copyApiExample(){
+  const el=$("apiExample"); if(!el) return;
+  try{ await navigator.clipboard.writeText(el.value); toast("已复制调用代码"); }
+  catch(e){ el.select(); document.execCommand("copy"); toast("已复制调用代码"); }
 }
 function toggleMtp(){ state.mtp=!state.mtp; LS.write("mtp",state.mtp); $("swMtp").classList.toggle("on",state.mtp);
   toast(state.mtp?"已开启 MTP 投机解码":"已关闭 MTP 投机解码"); }

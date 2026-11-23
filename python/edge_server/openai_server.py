@@ -1170,7 +1170,11 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
             gguf = _find_gguf(model_dir) if model_ok else None
             use_llama = _LLAMA_AVAILABLE and gguf is not None
             use_genai = (not use_llama) and _GENAI_AVAILABLE and model_ok and model_kind == "llm"
-            use_vlm_img = (not use_llama and not use_genai) and bool(req.images) and model_kind == "vlm" and _VLM_AVAILABLE
+            # VLMs (e.g. MiniCPM-V) run through VLMPipeline whether or not the
+            # user attached images. A *text-only* VLM query must still be routed
+            # there (it internally falls back NPU->CPU); otherwise it would fall
+            # through to the "no available path (vlm)" degradation.
+            use_vlm_img = (not use_llama and not use_genai) and model_kind == "vlm" and _VLM_AVAILABLE
             # NVIDIA + non-GGUF model: OpenVINO would run ~20× slower there, so
             # warn loudly instead of silently degrading.
             if _is_nvidia(dev) and model_kind in ("llm", "vlm") and not use_llama:
@@ -1179,7 +1183,8 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
                                      "建议在模型页选择 GGUF 模型（如 Qwen3.6-35B-A3B）。"})
             try:
                 if use_vlm_img:
-                    # VLM with images → VLMPipeline; emit the whole answer at once.
+                    # VLM (with or without images) → VLMPipeline, whole answer at
+                    # once. Internally falls back NPU->CPU if the IR can't run there.
                     global _vlm_img
                     if _vlm_img is None or _vlm_img.model_dir != model_dir:
                         _vlm_img = VlmImagePipeline(model_dir, device=ov_dev)
@@ -1260,8 +1265,9 @@ def chat(req: ChatRequest, authorization: Optional[str] = Header(default=None)):
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     # ---- non-streaming ----
-    # VLM with images: use VLMPipeline (handles the image processor).
-    if req.images and model_kind == "vlm" and _VLM_AVAILABLE:
+    # VLMs run through VLMPipeline whether or not images are attached (a
+    # text-only VLM query also works; the pipeline falls back NPU->CPU).
+    if model_kind == "vlm" and _VLM_AVAILABLE:
         try:
             global _vlm_img
             if _vlm_img is None or _vlm_img.model_dir != model_dir:

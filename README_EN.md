@@ -226,7 +226,6 @@ auto-matches the format, then downloads on click**.
 |---|---|---|---|---|
 | **Qwen3.8-Flash-Next** ⭐ | 180B stored / 6B active | llama.cpp CUDA · GGUF (UD-Q2_0) + MTP | 65.7 + 1.8 GB | SSD + RAM + VRAM |
 | **Qwen3.6-35B-A3B** | 35B-A3B · multimodal | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 21.2 / 19.4 GB | SSD + RAM + VRAM |
-| **Qwen3-30B-A3B** | 30B-A3B | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 18.6 / 16.3 GB | SSD + RAM + VRAM |
 | **Qwen3-8B** | 8B | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 5.0 / 4.7 GB | SSD + RAM (+ VRAM) |
 | **MiniCPM-V-4.5** | 9B · multimodal | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 6.0 / 5.3 GB | SSD + RAM (+ VRAM) |
 

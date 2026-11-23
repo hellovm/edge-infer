@@ -4,12 +4,25 @@
 
 ## [Unreleased]
 
+### 移除
+- **移除 Qwen3-Next-80B 与 Qwen3-30B-A3B**：模型清单（`model_catalog.py`）、UI、
+  README 中相应条目已删除；本地已下载的 46 GB `qwen3-next-80b-a3b-instruct-gguf`
+  目录一并清理。
+
 ### 修复
+- **NPU 运行 MiniCPM-V 4.5 纯文本无推理路径**：多模态 VLM 之前只有带图片时
+  才走 VLMPipeline；纯文本查询会落入"无可用推理路径（模型类型 vlm）"降级。
+  现 VLM 无论是否带图都走 VLMPipeline（内部 NPU→CPU 自动回退），纯文本也可用。
 - **超级模式 256K 上下文启动失败**：大上下文的 KV cache 放显存会 OOM
   （8 GB 卡即使 q8_0 量化仍需 ~1.8 GB），现自动把 KV 放系统内存。
 - **超级模式按钮竞态**：界面刚打开时硬件信息尚未加载完，点击会误报"硬件不支持"；
   现显示"检测中"，点击时自动等待检测结果。
 - 模型加载期间给出明确提示（首次约 1-2 分钟），推理错误直接显示在对话里。
+
+### 新增
+- **外部服务对接说明**：设置页新增"OpenAI 兼容 API · 外部服务使用说明"，
+  可填写 Base URL / 模型名（model_id）/ 上下文窗口（ctx），一键生成
+  curl 与 Python 调用代码（含复制按钮），方便外部服务接入本地推理引擎。
 
 ### 诊断改进
 - llama-server 的启动输出写入 `logs/llama-server.log`，加载失败可查。
