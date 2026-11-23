@@ -263,6 +263,30 @@ _gen = None  # lazily-loaded PureOVGenerator (VLM path)
 _gen_device: Optional[str] = None
 _genai = GenaiBackend() if _GENAI_AVAILABLE else None  # NPU/LLM path
 _llama = LlamaBackend() if _LLAMA_AVAILABLE else None  # GGUF path (llama.cpp)
+
+
+@app.on_event("startup")
+def _warm_probes() -> None:
+    """Pre-warm the slow hardware probes in the background.
+
+    CPU/memory/SSD queries shell out to PowerShell and cost seconds on a cold
+    start. Warming them at boot means the first /edge/devices (device menu,
+    settings page) is instant instead of blocking the UI.
+    """
+    import threading
+
+    def _warm():
+        try:
+            from . import diagnostics as _diag
+
+            _diag.probe_cpu()
+            _diag.probe_memory()
+            _diag.probe_nvidia()
+            _ssd_probe_bg()
+        except Exception:  # noqa: BLE001
+            pass
+
+    threading.Thread(target=_warm, name="warm-probes", daemon=True).start()
 _vlm_img = None  # lazily-built VlmImagePipeline (VLM + images)
 _MODELS_DIR = os.path.join(_REPO_ROOT, "models")
 
@@ -300,6 +324,10 @@ class ChatRequest(BaseModel):
     attachments: List[dict] = []          # [{name, content}] inline text files
     images: List[str] = []                # [{data_url}] inline images (VLM)
     web_search: bool = False              # search the web and inject results
+    # P0-2: bounded GPU expert cache in MiB (0 = llama.cpp default).
+    moe_cache_mib: Optional[int] = None
+    # P2: cap resident-expert pinning in MiB (0 = no explicit cap).
+    resident_budget_mib: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -422,13 +450,28 @@ def edge_problems_clear():
 
 
 
+# OpenVINO device enumeration is stable for the life of the process; cache it
+# so repeated /edge/devices hits (device menu, settings page, …) don't re-create
+# an ov.Core() each time.
+_ov_devices_cache: Optional[list] = None
+
+
+def _ov_devices() -> list:
+    global _ov_devices_cache
+    if _ov_devices_cache is None:
+        try:
+            import openvino as ov
+
+            _ov_devices_cache = list(ov.Core().get_available_devices())
+        except Exception:  # noqa: BLE001
+            _ov_devices_cache = []
+    return _ov_devices_cache
+
+
 @app.get("/edge/devices")
 def edge_devices():
     """Real hardware discovery (OpenVINO devices + the three-tier report)."""
-    import openvino as ov
-
-    core = ov.Core()
-    devs = core.get_available_devices()
+    devs = _ov_devices()
     is_llm = bool(is_llm_dir(DEFAULT_MODEL_DIR)) if is_llm_dir else False
     ssd = _probe_ssd()
     # Requested device is only honoured when the hardware is actually present
@@ -490,11 +533,31 @@ def edge_devices():
 
 # cache the SSD probe (benchmark is a few hundred ms; no need to repeat)
 _ssd_cache = None
+_ssd_probe_started = False
 
 
-def _probe_ssd():
-    global _ssd_cache
-    if _ssd_cache is None:
+def _ssd_quick():
+    """Instant placeholder SSD info — never shells out.
+
+    Both the disk-model query and the bandwidth benchmark cost seconds on a cold
+    PowerShell start, so neither may run on the request path. The real values
+    are filled in by `_ssd_probe_bg()`; until then we return a neutral estimate.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(name="NVMe SSD", read_gb_per_s=6.0, pcie5=False,
+                           read_bytes_per_s=6_000_000_000, measured=False)
+
+
+def _ssd_probe_bg() -> None:
+    """Run the slow SSD benchmark in a daemon thread, once, and cache it."""
+    global _ssd_cache, _ssd_probe_started
+    if _ssd_probe_started:
+        return
+    _ssd_probe_started = True
+
+    def _work():
+        global _ssd_cache
         try:
             from .storage_probe import detect_ssd
 
@@ -510,11 +573,24 @@ def _probe_ssd():
                     break
             _ssd_cache = detect_ssd(bench_file=bench)
         except Exception as e:  # noqa: BLE001
-            from types import SimpleNamespace
             print(f"[edge-infer] ssd probe failed: {e}")
-            _ssd_cache = SimpleNamespace(name="NVMe SSD", read_gb_per_s=6.0, pcie5=False,
-                                         read_bytes_per_s=6_000_000_000)
-    return _ssd_cache
+            _ssd_cache = _ssd_quick()
+
+    import threading
+    threading.Thread(target=_work, name="ssd-probe", daemon=True).start()
+
+
+def _probe_ssd():
+    """Non-blocking SSD info for request handlers.
+
+    Returns the measured result once the background probe has finished, else a
+    cheap name-only estimate immediately (never blocks on the disk benchmark).
+    """
+    global _ssd_cache
+    if _ssd_cache is not None:
+        return _ssd_cache
+    _ssd_probe_bg()
+    return _ssd_quick()
 
 
 @app.get("/edge/run_plan")
@@ -967,18 +1043,39 @@ def _llama_stream(frame, gguf_path: str, req, system: str, user: str):
     if not draft_path and getattr(req, "mtp", True):
         draft_path = _auto_draft(gguf_path)
 
+    # P0-2: bounded GPU expert cache (MiB). 0 = llama.cpp default (off).
+    # Per-request value wins over the env default.
+    try:
+        moe_cache_mib = int(os.environ.get("EDGE_MOE_CACHE_MIB", "0") or 0)
+    except ValueError:
+        moe_cache_mib = 0
+    if getattr(req, "moe_cache_mib", None) is not None:
+        moe_cache_mib = int(req.moe_cache_mib)
+    # P2: cap resident-expert pinning so the OS can't evict them mid-run.
+    try:
+        resident_budget_mib = int(os.environ.get("EDGE_RESIDENT_BUDGET_MIB", "0") or 0)
+    except ValueError:
+        resident_budget_mib = 0
+    if getattr(req, "resident_budget_mib", None) is not None:
+        resident_budget_mib = int(req.resident_budget_mib)
+    flash_attn = os.environ.get("EDGE_FLASH_ATTN", "1").lower() not in ("0", "off", "false")
+
     if not _llama.running() or (_llama._cfg and (
             _llama._cfg.model_path != gguf_path or _llama._cfg.reasoning != want_think
             or _llama._cfg.kv_quant != kv_q or _llama._cfg.ctx != ctx_size
             or _llama._cfg.kv_offload != kv_offload
-            or _llama._cfg.draft_path != draft_path)):
+            or _llama._cfg.draft_path != draft_path
+            or _llama._cfg.moe_cache_mib != moe_cache_mib
+            or _llama._cfg.resident_budget_mib != resident_budget_mib)):
         # NVIDIA → offload everything to CUDA (discrete VRAM). MoE layers can be
         # pushed to CPU/RAM via EDGE_N_CPU_MOE when the model exceeds VRAM.
         n_cpu_moe = int(os.environ.get("EDGE_N_CPU_MOE", "0") or 0)
         _llama.load(LlamaConfig(model_path=gguf_path, port=8081,
                                 n_cpu_moe=n_cpu_moe, reasoning=want_think,
                                 kv_quant=kv_q, kv_offload=kv_offload, ctx=ctx_size,
-                                draft_path=draft_path))
+                                draft_path=draft_path, flash_attn=flash_attn,
+                                moe_cache_mib=moe_cache_mib,
+                                resident_budget_mib=resident_budget_mib))
 
     msgs = []
     if system:

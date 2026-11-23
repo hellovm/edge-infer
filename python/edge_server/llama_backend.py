@@ -130,7 +130,30 @@ class LlamaConfig:
     kv_offload: bool = True      # put KV cache on GPU; False -> host RAM (large ctx)
     draft_path: str = ""         # MTP draft head (enables speculative decoding)
     spec_n_max: int = 2          # draft tokens per step (2 measured best here)
+    flash_attn: bool = True      # -fa; required for KV quantization + faster attn
+    # P0-2: bounded GPU expert cache (llama.cpp's answer to Strata's expert
+    # cache). 0 = let llama.cpp decide (default). ⚠️ Upstream reports it can
+    # split the graph (2 -> ~50 splits/token) and cost ~10% even when everything
+    # fits, so we only pass it when the caller opts in.
+    moe_cache_mib: int = 0
+    # P2: cap how much of RAM the engine may pin for resident experts, so the OS
+    # page cache can't evict them mid-generation (Strata's `resident-budget`;
+    # measured +20% decode when set). 0 = no explicit cap.
+    resident_budget_mib: int = 0
     extra_args: tuple = ()       # escape hatch for arch-specific flags
+
+    def resolved_draft(self) -> str:
+        """MTP draft head, auto-disabled for very large contexts.
+
+        P1-A: on an 8 GB card the draft layer costs ~820 MiB–1.8 GiB, and it is
+        measured to *zero* decode benefit there while cutting prefill. When the
+        context is large enough that KV cache is already tight, drop the draft.
+        """
+        if not self.draft_path:
+            return ""
+        if self.ctx >= 65536:
+            return ""
+        return self.draft_path
 
 
 class LlamaBackend:
@@ -193,6 +216,10 @@ class LlamaBackend:
             args += ["--n-cpu-moe", str(n_cpu_moe)]
         if cfg.threads:
             args += ["-t", str(cfg.threads)]
+        # P1-B: flash-attention is required for KV quantization and speeds up
+        # attention; enable it for every path that supports it.
+        if cfg.flash_attn:
+            args += ["-fa", "on"]
         if cfg.kv_quant:
             # KV 量化是大上下文的关键（256K × f16 会吃掉数 GB 显存）。
             args += ["-ctk", cfg.kv_quant, "-ctv", cfg.kv_quant]
@@ -201,13 +228,21 @@ class LlamaBackend:
             # of failing cudaMalloc. Measured: 256K needs ~1.8 GB even at q8_0,
             # which does not fit alongside a 66 GB MoE on an 8 GB card.
             args += ["--no-kv-offload"]
+        # P0-2: bounded GPU expert cache (opt-in; see LlamaConfig note).
+        if cfg.moe_cache_mib > 0:
+            args += ["--moe-cache-mib", str(cfg.moe_cache_mib)]
+        # P2: cap pinning so the OS can't evict resident experts mid-run.
+        if cfg.resident_budget_mib > 0:
+            args += ["--set", f"resident-budget-mib={cfg.resident_budget_mib}"]
 
         # MTP speculative decoding: a small draft head proposes tokens that the
         # target verifies in one pass (lossless). Measured ~+17% decode here;
         # the gain is capped by SSD paging, not by the head's precision.
-        if cfg.draft_path and os.path.isfile(cfg.draft_path):
+        # resolved_draft() auto-disables it at ctx >= 64K (8 GB cards).
+        draft = cfg.resolved_draft()
+        if draft and os.path.isfile(draft):
             args += [
-                "-md", cfg.draft_path,
+                "-md", draft,
                 "--spec-type", "draft-mtp",
                 "--spec-draft-n-max", str(cfg.spec_n_max),
             ]

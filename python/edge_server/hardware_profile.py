@@ -11,7 +11,7 @@ fast tiers" and "how much must be read from SSD per token". The RAM capacity
 is the single biggest determinant:
 
   16 GB  -> after OS (≈4 GB) + DVMT/reserve, ~10-11 GB usable for weights+KV.
-            A 66 GB Q2_0 model must keep most experts on SSD. Small ncmoe.
+            The 1-bit model must keep most experts on SSD. Small ncmoe.
   32 GB  -> ~24-26 GB usable. A much larger hot expert set fits in RAM, so
             SSD reads per token drop sharply and long context becomes viable.
 """
@@ -113,7 +113,7 @@ def offload_strategy(device: str, total_ram_gb: float) -> OffloadStrategy:
                 note=f"16G 内存：{usable:.0f}GB 可用，需减小 ncmoe 防换页；上下文建议 ≤128K",
             )
         # 16 GB class: the Qwen3.8-Flash-Next "exploration" tier. It *can* run
-        # the 66 GB Q2_0 model on SSD, but only a small hot-expert set fits in
+        # the 1-bit model on SSD, but only a small hot-expert set fits in
         # RAM, so ncmoe must be conservative and context capped.
         return OffloadStrategy(
             device="NVIDIA-GPU", ram_tier=tier,

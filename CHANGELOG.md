@@ -4,12 +4,29 @@
 
 ## [Unreleased]
 
+### 变更（性能方向）
+- **旗舰模型改用更小量化档位**：Qwen3.8-Flash-Next 由 `UD-Q2_0`（权重 41.7 GB）
+  换为 **`UD-IQ1_S`（1-bit，权重 37.6 GB）**。权重越小，越多专家能落进 32 GB 内存，
+  每 token 的 SSD 读盘越少 —— 这是「小显存跑大模型」速度的决定性因素
+  （对标 Strata 在 8 GB + 32 GB 上 30-45 tok/s 的做法）。第 3 分片 28.8 GB 为
+  engram/n-gram 表，由 mmap 常驻 SSD，不占内存。
+- **MTP 大上下文自动关闭**：上下文 ≥ 64K 时不再加载 MTP draft 层
+  （8 GB 卡上它占 0.8–1.8 GB 却几乎零 decode 收益，反而挤占 KV 缓存）。
+- **启用 Flash Attention**（`-fa on`）：加速注意力，且是 KV 量化的前提。
+
 ### 新增
+- **三层卸载 · 高级调参（设置页）**：
+  - **GPU 专家缓存**（`--moe-cache-mib`）：把高频专家钉在显存，对标 Strata 专家缓存。
+    ⚠️ 上游实测会图分裂、即便全装下也可能损失约 10%，故默认关闭、按需开启。
+  - **内存驻留预算**（`--set resident-budget-mib=`）：限制引擎钉住的专家内存，
+    防止被系统页缓存抢占（社区实测该参数可带来约 +20% decode）。
+  - **Flash Attention** 开关。
+  对应环境变量：`EDGE_MOE_CACHE_MIB` / `EDGE_RESIDENT_BUDGET_MIB` / `EDGE_FLASH_ATTN`。
+- **Anthropic 兼容接口** `/v1/messages`：可让 Claude Code / Anthropic SDK 直连本地引擎
+  （支持流式 SSE 事件与 `x-api-key` / Bearer 双鉴权），与 `/v1/chat/completions` 复用同一后端。
 - **Windows 安装包（免装 Python）**：`installer/` 提供 Inno Setup 脚本与一键构建脚本，
   产出 `edge-infer-<版本>-setup.exe`。安装包内置**便携 Python 运行时**与全部依赖，
   目标机器无需预装 Python；自动创建桌面 / 开始菜单快捷方式与 `models\` 目录。
-- **Anthropic 兼容接口** `/v1/messages`：可让 Claude Code / Anthropic SDK 直连本地引擎
-  （支持流式 SSE 事件与 `x-api-key` / Bearer 双鉴权），与 `/v1/chat/completions` 复用同一后端。
 - **版本更新检测**：设置 → 关于新增「检查更新」，查询 GitHub Releases 最新版本，
   提示新版并直达安装包下载（Tauri 走原生命令，浏览器走 GitHub API）。
 
@@ -20,6 +37,7 @@
 - 首次运行自动创建 `models\` 目录并写入说明，避免用户不清楚模型放哪。
 - **专家画像持久化**（Strata 同款）：学习型缓存的专家热度画像可存盘 / 载入，
   跨会话免冷启动（`learned_cache` 新增 `save_profile` / `load_profile` + 单测）。
+- **设备菜单即时响应**：设备下拉不再等待硬件探测（此前会阻塞数秒）。
 
 ### 移除
 - **移除 Qwen3-Next-80B 与 Qwen3-30B-A3B**：模型清单（`model_catalog.py`）、UI、

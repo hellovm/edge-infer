@@ -82,6 +82,24 @@ def _probe(name: str, fn) -> Dict[str, Any]:
         }
 
 
+# --- TTL cache for expensive probes -----------------------------------------
+# Some probes shell out to PowerShell (CIM queries), which costs seconds on a
+# cold start (~2.5 s for memory, ~8 s for the physical-disk query). Hardware
+# facts don't change between requests, so cache them; the GUI can still force a
+# refresh by calling with ttl=0.
+_CACHE: Dict[str, tuple] = {}
+
+
+def _cached(key: str, ttl: float, fn):
+    now = time.time()
+    hit = _CACHE.get(key)
+    if hit and ttl > 0 and (now - hit[0]) < ttl:
+        return hit[1]
+    val = fn()
+    _CACHE[key] = (now, val)
+    return val
+
+
 def probe_os() -> Dict[str, Any]:
     return {
         "platform": platform.platform(),
@@ -97,6 +115,11 @@ def probe_os() -> Dict[str, Any]:
 
 
 def probe_cpu() -> Dict[str, Any]:
+    # CPU facts are static; cache aggressively (PowerShell CIM is ~1-2 s cold).
+    return _cached("cpu", 3600, _probe_cpu_uncached)
+
+
+def _probe_cpu_uncached() -> Dict[str, Any]:
     info: Dict[str, Any] = {
         "logical_cores": os.cpu_count(),
         "arch": platform.machine(),
@@ -134,6 +157,12 @@ def probe_cpu() -> Dict[str, Any]:
 
 
 def probe_memory() -> Dict[str, Any]:
+    # Total RAM is static; free RAM is not, but the GUI only needs it for the
+    # hardware profile, so a short TTL is plenty (PowerShell CIM is ~2.5 s cold).
+    return _cached("memory", 20, _probe_memory_uncached)
+
+
+def _probe_memory_uncached() -> Dict[str, Any]:
     info: Dict[str, Any] = {}
     if os.name == "nt":
         # CIM is locale-independent; wmic is deprecated and now often absent.
@@ -165,7 +194,11 @@ def probe_memory() -> Dict[str, Any]:
 
 
 def probe_nvidia() -> Dict[str, Any]:
-    """NVIDIA GPU presence + driver via nvidia-smi."""
+    """NVIDIA GPU presence + driver via nvidia-smi (cached; static per session)."""
+    return _cached("nvidia", 3600, _probe_nvidia_uncached)
+
+
+def _probe_nvidia_uncached() -> Dict[str, Any]:
     exe = shutil.which("nvidia-smi")
     if not exe:
         return {"available": False, "reason": "nvidia-smi not found on PATH"}

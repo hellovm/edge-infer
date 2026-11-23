@@ -47,23 +47,29 @@ MODELS: List[dict] = [
         "params": "180B",
         "active": "6B",
         "mm": True,
-        "note": "旗舰 MoE（180B 存储 / 6B 激活）· 三层卸载首选 · 可配 MTP 投机解码再提速",
+        "note": "旗舰 MoE（180B 存储 / 6B 激活）· 1-bit 极小量化 · 三层卸载首选 · 可配 MTP 提速",
         "variants": {
             "nvidia": {
                 "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
-                "subdir": "UD-Q2_0",
-                "quant": "GGUF UD-Q2_0",
+                "subdir": "UD-IQ1_S",
+                "quant": "GGUF UD-IQ1_S (1-bit)",
                 "backend": "llama.cpp (CUDA)",
-                "size_gb": 65.7,
-                "ram_hint": "≥ 32 GB 内存；8 GB 显存 + 三层卸载（推荐 ncmoe=35）",
+                # Weights shard ≈ 37.6 GB (>32 GB RAM → part streams from SSD);
+                # the 28.8 GB engram/n-gram shard is mmap'd to SSD, not resident.
+                # Smaller than UD-Q2_0 (41.7 GB weights) so more experts fit in
+                # RAM. Measured on RTX 4070 8 GB + 32 GB: 1-bit cuts SSD traffic
+                # per token ~10% vs Q2_0 — the decisive factor is RAM residency.
+                "size_gb": 66.4,
+                "weights_gb": 37.6,
+                "ram_hint": "≥ 32 GB 内存；8 GB 显存 + 三层卸载（ncmoe≈30）",
                 "min_ssd_gb": 70,
-                "files": ["*UD-Q2_0*.gguf"],
+                "files": ["*UD-IQ1_S*.gguf"],
                 "draft": {
                     "subdir": "MTP",
                     "file": "mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf",
                     "quant": "MTP draft shared-Q4_K_M",
                     "size_gb": 1.8,
-                    "note": "投机解码 draft head（无损，实测 +17% decode）",
+                    "note": "投机解码 draft head（无损，实测 +17% decode）；ctx≥64K 自动关闭以省显存",
                 },
             },
         },

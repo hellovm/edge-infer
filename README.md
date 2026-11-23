@@ -142,25 +142,32 @@ Prefill = 提示词处理，decode = 稳态生成。
 
 | 主模型 · 量化 | 后端 · 设备 | 卸载配置 | Decode tok/s |
 |---|---|---|---|
-| **UD-Q2_0（65.7 GB）** | llama.cpp CUDA · RTX 4070 8 GB | `ncmoe=35` | **1.1** |
-| UD-IQ1_S（66.4 GB） | 同上 | `ncmoe=30` | 1.1 |
-| UD-IQ4_XS（87 GB） | 同上 | `ncmoe=45` | 1.2 |
+| **UD-IQ1_S（权重 37.6 GB）** ⭐ | llama.cpp CUDA · RTX 4070 8 GB | `ncmoe=30` | **1.1** |
+| UD-IQ1_M（39.2 GB） | 同上 | `ncmoe=32` | 1.1 |
+| UD-Q2_0（41.7 GB） | 同上 | `ncmoe=35` | 1.1 |
 
 > 三种量化等级 decode 几乎相同 —— 因为瓶颈是 **SSD 分页加载专家权重的 IO**，
 > 不是计算或量化精度。这也决定了「跑得动大模型」的性价比主要来自三层卸载本身。
+>
+> **默认档位为 UD-IQ1_S（1-bit）**：权重 37.6 GB 是三者中最小，
+> 让更多专家能落进 32 GB 内存（第 3 分片 28.8 GB 是 engram/n-gram 表，
+> 由 mmap 常驻 SSD、不计入内存）。量化越小 → 每 token 读盘越少 → 越接近
+> 「专家常驻内存、CPU 就地算」的理想形态。
 
 **MTP 投机解码对比**（同一真实任务，`-c 4096 -n 192`，各测 2 次取稳）：
 
 | 主模型 | 无 MTP | + MTP（shared draft，n-max 2） | 提升 |
 |---|---|---|---|
-| **UD-Q2_0** | 1.2 t/s | **1.4 t/s** | **+17%** |
-| UD-IQ1_S | 1.1 t/s | 1.3 t/s | +18% |
-| UD-IQ4_XS | 1.2 t/s | 1.4 t/s | +17% |
+| **UD-IQ1_S** | 1.1 t/s | **1.3 t/s** | **+18%** |
+| UD-IQ1_M | 1.2 t/s | 1.4 t/s | +17% |
+| UD-Q2_0 | 1.2 t/s | 1.4 t/s | +17% |
 
 > MTP 用 draft head 预判多个候选 token，主模型**一次并行校验**（数学上无损，
 > 输出与不开时逐字一致）。提速稳定在 **~17%**，且同样受限于 SSD 带宽 ——
 > 它减少 decode 步数，但绕不过每步的专家权重加载。
 > draft 优先选 `shared-` 变体（借用主模型 embedding，更省内存、更快）。
+> **上下文 ≥ 64K 时会自动关闭 MTP**，把显存留给 KV 缓存（8 GB 卡上 draft
+> 层占 0.8–1.8 GB 却几乎零收益，与社区实测一致）。
 
 ### 怎么读这组数
 
@@ -198,13 +205,14 @@ Prefill = 提示词处理，decode = 稳态生成。
 
 | 模型 | 参数 | 后端 · 格式 | 体积 | 分层 |
 |---|---|---|---|---|
-| **Qwen3.8-Flash-Next** ⭐ | 180B 存储 / 6B 激活 | llama.cpp CUDA · GGUF（UD-Q2_0）+ MTP | 65.7 + 1.8 GB | SSD + 内存 + 显存 |
+| **Qwen3.8-Flash-Next** ⭐ | 180B 存储 / 6B 激活 | llama.cpp CUDA · GGUF（UD-IQ1_S）+ MTP | 66.4 + 1.8 GB | SSD + 内存 + 显存 |
 | **Qwen3.6-35B-A3B** | 35B-A3B · 多模态 | llama.cpp CUDA · GGUF / OpenVINO · INT4 | 21.2 / 19.4 GB | SSD + 内存 + 显存 |
 | **Qwen3-8B** | 8B | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 5.0 / 4.75 GB | SSD + 内存（+ 显存） |
 | **MiniCPM-V-4.5** | 9B · 多模态 | llama.cpp CUDA · GGUF / OpenVINO · INT4_SYM | 6.0 / 5.26 GB | SSD + 内存（+ 显存） |
 
-- ⭐ **默认旗舰组合：Qwen3.8-Flash-Next（UD-Q2_0）+ shared-Q4_K_M MTP draft** ——
-  180B 存储的旗舰 MoE，在 8 GB 显存 / 32 GB 内存上即可运行，并自动启用 MTP 投机解码。
+- ⭐ **默认旗舰组合：Qwen3.8-Flash-Next（UD-IQ1_S，1-bit）+ shared-Q4_K_M MTP draft** ——
+  180B 存储的旗舰 MoE，在 8 GB 显存 / 32 GB 内存上即可运行；1-bit 权重最小，
+  让更多专家落进内存。上下文 ≥ 64K 时自动关闭 MTP。
 - **N 卡**：一律走 **llama.cpp CUDA**（8B 实测 43.3 tok/s；交给 OpenVINO 只有 2.3）。
   从 35B-A3B 到 180B 存储的 Flash-Next —— 8 GB 显存也能跑，靠三层卸载。
 - **i 卡**：走 **OpenVINO**（Arc 上比 Vulkan 快约 1.8×），30B / 35B MoE 均可卸载。
@@ -558,9 +566,16 @@ OpenVINO 的 GPU / NPU 插件为 Intel 专属，无法驱动 AMD XDNA NPU，
 | `EDGE_N_CPU_MOE` | `0` | 放在 CPU/内存的 MoE 层数（三层卸载开关） |
 | `EDGE_CTX` | `32768` | llama.cpp 上下文窗口（最大 1048576） |
 | `EDGE_KV_QUANT` | 自动 | KV cache 量化；≥64K 上下文时自动用 `q8_0` |
-| `EDGE_MTP_DRAFT` | 自动 | MTP draft 模型路径；留空则自动在同级 `MTP/` 目录查找 |
+| `EDGE_KV_OFFLOAD` | `auto` | KV cache 是否放显存；`auto` = ≥64K 上下文时放内存 |
+| `EDGE_FLASH_ATTN` | `1` | Flash Attention（加速注意力，KV 量化前提）；`0` 关闭 |
+| `EDGE_MOE_CACHE_MIB` | `0` | GPU 专家缓存大小（MiB）；`0` = 交给引擎。⚠️ 上游实测可能损失约 10% |
+| `EDGE_RESIDENT_BUDGET_MIB` | `0` | 限制引擎钉住的内存专家量（MiB），防被系统页缓存抢占；`0` = 不限 |
+| `EDGE_MTP_DRAFT` | 自动 | MTP draft 模型路径；留空则自动在同级 `MTP/` 目录查找（ctx≥64K 自动关闭） |
 | `EDGE_LOG_LEVEL` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARNING` |
 | `EDGE_DIAG_BOOT` | `0` | `1` = 启动时自动生成诊断包 |
+
+> 上述卸载参数（GPU 专家缓存 / 内存驻留预算 / Flash Attention）也可在
+> **设置 → 三层卸载 · 高级**里调整，无需改环境变量。
 
 ---
 

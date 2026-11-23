@@ -461,12 +461,13 @@ const DEV_OPTS=[
   {id:"NPU",label:"Intel NPU",cap:"OpenVINO · 低功耗小模型",color:"var(--npu)"},
   {id:"CPU",label:"CPU",cap:"通用回退",color:"#64748b"},
 ];
-async function toggleDevMenu(e){
+function toggleDevMenu(e){
   if(e) e.stopPropagation();
-  const m=$("devMenu"); const show=!m.classList.contains("show");
-  if(!show){ m.classList.remove("show"); return; }
-  let avail=[];
-  try{ const j=await (await fetch(API+"/edge/devices")).json(); avail=j.openvino_devices||[]; }catch(e){}
+  const m=$("devMenu");
+  // Toggle instantly: the option list is static, so there is no reason to wait
+  // on any network round-trip (the old code awaited /edge/devices, which runs a
+  // full hardware + SSD-bandwidth probe, so the menu felt frozen for seconds).
+  if(m.classList.contains("show")){ m.classList.remove("show"); return; }
   m.innerHTML=DEV_OPTS.map(o=>{
     const sel=state.device===o.id;
     const cur=sel?'<span class="cur">当前</span>':'';
@@ -755,6 +756,7 @@ async function send(){
       const payload={model:"qwen",model_id:state.modelId,messages:[{role:"user",content:t}],max_tokens:512,temperature:0,stream:true,
         device:state.device,enable_thinking:state.thinking,web_search:!!state.webSearch,mtp:state.mtp,
         ctx: state.superMode ? 262144 : 65536,
+        moe_cache_mib: state.moeCacheMib||0, resident_budget_mib: state.residentBudgetMib||0,
         attachments:atts.filter(a=>a.kind!=="image").map(a=>({name:a.name,content:a.content})),
         images:atts.filter(a=>a.kind==="image"&&a.image).map(a=>a.image)};
       const resp=await fetch(API+"/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
@@ -791,6 +793,7 @@ async function send(){
         url=API+"/v1/chat/completions";
         payload={model:"qwen",model_id:state.modelId,messages:[{role:"user",content:t}],max_tokens:512,temperature:0,
           device:state.device,enable_thinking:state.thinking,web_search:!!state.webSearch,
+          moe_cache_mib: state.moeCacheMib||0, resident_budget_mib: state.residentBudgetMib||0,
           attachments:atts.filter(a=>a.kind!=="image").map(a=>({name:a.name,content:a.content})),
           images:atts.filter(a=>a.kind==="image"&&a.image).map(a=>a.image)};
       }
@@ -937,7 +940,23 @@ const PANELS={
       <div class="sec"><h3>性能加速</h3>
         <div class="frow"><div class="lbl">MTP 投机解码<small>预判多个 token 由主模型一次校验，输出不变、速度更快</small></div>
           <div class="switch" id="swMtp" onclick="toggleMtp()"><i></i></div></div>
-        <div class="desc">开启后，凡带 MTP draft 的模型（如 Qwen3.8-Flash-Next）自动启用，实测可提升约 17% 生成速度。</div>
+        <div class="desc">开启后，凡带 MTP draft 的模型（如 Qwen3.8-Flash-Next）自动启用，实测可提升约 17% 生成速度。
+          上下文达到 64K 及以上时会自动关闭，把显存留给 KV 缓存。</div>
+      </div>
+      <div class="sec"><h3>三层卸载 · 高级</h3>
+        <div class="desc">针对 8 GB 显存 + 32 GB 内存跑超大 MoE 的调优项。留 0 表示交给引擎自动决定，
+          不确定时保持默认即可。</div>
+        <div class="frow"><div class="lbl">GPU 专家缓存<small>MiB · 把高频专家钉在显存（0=关闭）。注意：上游实测可能损失约 10%</small></div>
+          <input type="number" id="advMoeCache" class="btn" min="0" step="256" value="0" style="width:110px" title="MiB">
+        </div>
+        <div class="frow"><div class="lbl">内存驻留预算<small>MiB · 限制引擎钉住的专家内存，防被系统页缓存抢占（0=不限）</small></div>
+          <input type="number" id="advResident" class="btn" min="0" step="512" value="0" style="width:110px" title="MiB">
+        </div>
+        <div class="frow"><div class="lbl">Flash Attention<small>加速注意力并支撑 KV 量化，建议开启</small></div>
+          <div class="switch on" id="swFA" onclick="toggleFA()"><i></i></div></div>
+        <div class="frow"><div style="flex:1"></div>
+          <button class="btn" onclick="saveAdvOffload()">保存并应用</button></div>
+        <div class="desc" id="advHint" style="color:var(--dim)">修改后在下次对话生效（会重新加载模型）。</div>
       </div>
       <div class="sec"><h3>推理源</h3>
         <div class="frow"><div class="lbl">使用外接 API<small>关闭时使用本地引擎</small></div>
@@ -1189,6 +1208,7 @@ function initSettings(){
   $("extBase").value=state.ext.base||""; $("extKey").value=state.ext.key||""; $("extModel").value=state.ext.model||"";
   ["extBase","extKey","extModel"].forEach(id=>$(id).onchange=()=>{ state.ext={base:$("extBase").value,key:$("extKey").value,model:$("extModel").value}; LS.write("ext",state.ext); });
   $("swMtp").classList.toggle("on",state.mtp);
+  initAdvOffload();
   populateApiSection();
   renderDevGrid();
   loadDiagnostics();
@@ -1297,6 +1317,25 @@ function _verNewer(a,b){
 }
 function toggleMtp(){ state.mtp=!state.mtp; LS.write("mtp",state.mtp); $("swMtp").classList.toggle("on",state.mtp);
   toast(state.mtp?"已开启 MTP 投机解码":"已关闭 MTP 投机解码"); }
+
+// ---- 三层卸载 · 高级（P0-2 GPU 专家缓存 / P2 内存驻留预算 / P1-B Flash Attention）----
+function toggleFA(){ state.flashAttn=!state.flashAttn; LS.write("flashAttn",state.flashAttn);
+  $("swFA").classList.toggle("on",state.flashAttn); toast(state.flashAttn?"已开启 Flash Attention":"已关闭 Flash Attention"); }
+function initAdvOffload(){
+  state.flashAttn = LS.read("flashAttn", true);
+  const fa=$("swFA"); if(fa) fa.classList.toggle("on",state.flashAttn);
+  const mc=LS.read("moeCacheMib",0), rb=LS.read("residentBudgetMib",0);
+  if($("advMoeCache")) $("advMoeCache").value=mc||0;
+  if($("advResident")) $("advResident").value=rb||0;
+}
+function saveAdvOffload(){
+  const mc=Math.max(0, parseInt(($("advMoeCache")?.value||"0"),10)||0);
+  const rb=Math.max(0, parseInt(($("advResident")?.value||"0"),10)||0);
+  LS.write("moeCacheMib",mc); LS.write("residentBudgetMib",rb);
+  state.moeCacheMib=mc; state.residentBudgetMib=rb;
+  const h=$("advHint"); if(h) h.textContent = `已保存：GPU 专家缓存 ${mc||"自动"} MiB · 内存驻留预算 ${rb||"不限"} MiB。下次对话生效。`;
+  toast("高级卸载参数已保存");
+}
 
 // ---- 环境诊断 / 问题记录 ----
 async function loadDiagnostics(){
@@ -1449,9 +1488,10 @@ function renderTierPlan(p){
   return L.join("\n");
 }
 async function renderDevGrid(){
+  const grid=$("devGrid"); if(!grid) return;   // 面板未打开：不做任何事（原来会白跑一次慢探测）
   let npu=false, devs=[];
   try{ const j=await (await fetch(API+"/edge/devices")).json(); devs=j.openvino_devices||[]; npu=devs.includes("NPU"); }catch(e){}
-  const grid=$("devGrid"); if(!grid) return; grid.innerHTML="";
+  grid.innerHTML="";
   [{id:"auto",nm:"自动选择",cap:"按模型规模自动路由",tag:"推荐",color:"var(--brand)"},
    {id:"NVIDIA-GPU",nm:"NVIDIA GPU",cap:"CUDA · 实测比 OpenVINO 快约 20×",tag:"CUDA",color:"var(--nvidia)"},
    {id:"NPU",nm:"Intel NPU",cap:"OpenVINO · 低功耗小模型",tag:npu?"可用":"未检测",color:"var(--npu)"},
@@ -1464,9 +1504,15 @@ async function renderDevGrid(){
   $("devHint").textContent="当前后端设备："+(state.loadedDevice||state.device);
 }
 async function selectDevice(id,name){
-  state.device=id; LS.write("device",id); renderDevGrid();
-  try{ const j=await (await fetch(API+"/edge/device/set?device="+encodeURIComponent(id),{method:"POST"})).json();
-    toast("已切换设备："+name); loadDeviceChip();
+  // Update the UI first so the click feels instant; the backend call only
+  // unloads the pipeline, it does not need to block the visible feedback.
+  state.device=id; LS.write("device",id);
+  const chip=$("chipDevice"); if(chip) chip.textContent="设备："+(DEV_SHORT[id]||"–");
+  renderDevGrid();
+  toast("已切换设备："+name);
+  try{
+    await fetch(API+"/edge/device/set?device="+encodeURIComponent(id),{method:"POST"});
+    loadDeviceChip();
     // 模型页按设备自动匹配格式，切换后刷新
     if($("catalog")) loadCatalog();
     if(MODELS.length) toggleModelMenuRefresh();
