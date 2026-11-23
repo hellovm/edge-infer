@@ -19,7 +19,7 @@ import json
 import os
 import time
 import uuid
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -1388,6 +1388,222 @@ def _resp(model: str, text: str, *, prompt_tokens: int, completion_tokens: int,
              "finish_reason": "stop"}
         ],
         "usage": usage,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Anthropic-compatible endpoint (/v1/messages)
+#
+# Lets Claude Code / any Anthropic SDK point at the local engine as if it were
+# an Anthropic Messages API. The request is translated into the OpenAI-shaped
+# ChatRequest, run through the *same* backend paths as /v1/chat/completions,
+# then the result is reshaped into Anthropic event / response shapes so the
+# client's SDK doesn't need to know it's talking to edge-infer.
+#
+# Auth: `x-api-key` or `Authorization: Bearer` (both accepted).
+# ---------------------------------------------------------------------------
+class AnthropicMessage(BaseModel):
+    # Anthropic messages carry a role ("user" / "assistant"); content is either
+    # a string or a list of typed blocks.
+    role: str = "user"
+    content: Union[str, List[Dict[str, Any]]] = ""
+
+
+class AnthropicRequest(BaseModel):
+    model: str = "claude"
+    max_tokens: int = Field(default=1024, ge=1, le=32768)
+    system: Union[str, List[Dict[str, Any]], None] = None
+    messages: List[AnthropicMessage] = []
+    temperature: float = Field(default=1.0, ge=0.0, le=2.0)
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    stream: bool = False
+    stop_sequences: List[str] = []
+    # Passthrough fields that map onto ChatRequest so callers can still
+    # switch model / device / context / MTP on the Anthropic surface.
+    model_id: Optional[str] = None
+    device: Optional[str] = None
+    mtp: bool = True
+    ctx: Optional[int] = None
+    web_search: bool = False
+
+
+def _anthropic_content_to_text(content: Union[str, List[Dict[str, Any]]]) -> str:
+    """Flatten Anthropic's typed content blocks into a single string prompt.
+
+    We only need text for the local backends; image / tool_use blocks are
+    skipped (the GUI's /v1/chat/completions is where multimodal input goes).
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+    parts: List[str] = []
+    for block in content:
+        btype = block.get("type")
+        if btype == "text" and block.get("text"):
+            parts.append(str(block["text"]))
+        elif btype == "tool_use":
+            parts.append(f"[tool_use {block.get('name','?')}]\n{block.get('input','')}")
+    return "\n".join(parts)
+
+
+def _anthropic_system_to_text(system: Union[str, List[Dict[str, Any]], None]) -> str:
+    if system is None:
+        return ""
+    if isinstance(system, str):
+        return system
+    if isinstance(system, list):
+        return "\n".join(str(b.get("text", "")) for b in system if isinstance(b, dict))
+    return str(system)
+
+
+def _anthropic_auth(authorization: Optional[str], x_api_key: Optional[str]) -> None:
+    """Accept either the Anthropic-style `x-api-key` or a Bearer token."""
+    token = x_api_key or (authorization.removeprefix("Bearer ").strip()
+                          if authorization and authorization.startswith("Bearer") else None)
+    if not EDGE_API_KEY:
+        return
+    if not token or token != EDGE_API_KEY:
+        raise HTTPException(status_code=401, detail="invalid API key")
+
+
+def _map_finish(reason: Optional[str]) -> str:
+    """Translate an OpenAI ``finish_reason`` onto an Anthropic ``stop_reason``."""
+    if not reason:
+        return "end_turn"
+    if reason == "length":
+        return "max_tokens"
+    if reason == "stop_sequence":
+        return "stop_sequence"
+    return "end_turn"
+
+
+@app.post("/v1/messages")
+def anthropic_messages(
+    req: AnthropicRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+):
+    _anthropic_auth(authorization, x_api_key)
+
+    # Build the equivalent ChatRequest; the heavy lifting (model selection,
+    # backend dispatch, streaming) is reused so behaviour stays identical.
+    openai_msgs: List[ChatMessage] = []
+    sys_text = _anthropic_system_to_text(req.system)
+    if sys_text:
+        openai_msgs.append(ChatMessage(role="system", content=sys_text))
+    for m in req.messages:
+        openai_msgs.append(ChatMessage(role=m.role,
+                                       content=_anthropic_content_to_text(m.content)))
+
+    chat_req = ChatRequest(
+        model=req.model,
+        model_id=req.model_id,
+        messages=openai_msgs,
+        max_tokens=min(req.max_tokens, 8192),
+        temperature=req.temperature,
+        stream=req.stream,
+        device=req.device,
+        mtp=req.mtp,
+        ctx=req.ctx,
+        web_search=req.web_search,
+    )
+
+    def _resp_id() -> str:
+        return f"msg_{uuid.uuid4().hex[:24]}"
+
+    # Re-auth for the underlying chat() call. The Anthropic surface already
+    # verified the key via _anthropic_auth (x-api-key OR Bearer); chat() only
+    # speaks Bearer, so normalise whichever form the client supplied.
+    bearer = authorization or (f"Bearer {x_api_key}" if x_api_key else None)
+
+    if req.stream:
+        from fastapi.responses import StreamingResponse
+
+        def sse_anthropic(obj: dict) -> str:
+            import json as _j
+            return f"event: {obj.pop('event')}\ndata: {_j.dumps(obj, ensure_ascii=False)}\n\n"
+
+        rid = _resp_id()
+
+        async def anthropic_stream():
+            # message_start
+            yield sse_anthropic({
+                "event": "message_start",
+                "message": {
+                    "id": rid, "type": "message", "role": "assistant",
+                    "model": req.model, "content": [], "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
+            })
+            yield sse_anthropic({"event": "content_block_start",
+                                 "index": 0,
+                                 "content_block": {"type": "text", "text": ""}})
+            # Reuse the OpenAI backend: chat() returns an SSE StreamingResponse
+            # whose body_iterator yields OpenAI frames. Decode each frame and
+            # re-emit it as Anthropic content_block_delta events.
+            oai = chat(chat_req, bearer)
+            out_tokens = 0
+            stop_reason = "end_turn"
+            async for raw in oai.body_iterator:
+                if isinstance(raw, (bytes, bytearray)):
+                    raw = raw.decode("utf-8", "ignore")
+                for line in str(raw).splitlines():
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload or payload == "[DONE]":
+                        continue
+                    try:
+                        obj = json.loads(payload)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if obj.get("error"):
+                        yield sse_anthropic({
+                            "event": "content_block_delta", "index": 0,
+                            "delta": {"type": "text_delta",
+                                      "text": f"[error] {obj['error']}"}})
+                        continue
+                    choice = (obj.get("choices") or [{}])[0]
+                    delta = (choice.get("delta") or {}).get("content") or ""
+                    if delta:
+                        out_tokens += max(len(delta) // 2, 1)
+                        yield sse_anthropic({
+                            "event": "content_block_delta", "index": 0,
+                            "delta": {"type": "text_delta", "text": delta}})
+                    if choice.get("finish_reason"):
+                        stop_reason = _map_finish(choice["finish_reason"])
+            yield sse_anthropic({"event": "content_block_stop", "index": 0})
+            yield sse_anthropic({
+                "event": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                "usage": {"output_tokens": out_tokens},
+            })
+            yield sse_anthropic({"event": "message_stop"})
+
+        return StreamingResponse(anthropic_stream(), media_type="text/event-stream",
+                                 headers={"x-request-id": rid})
+
+    # Non-streaming: reuse chat() (returns an OpenAI-shaped dict), then reshape
+    # it into a single Anthropic message object.
+    oai = chat(chat_req, bearer)
+    choice = (oai.get("choices") or [{}])[0]
+    text = (choice.get("message") or {}).get("content", "") or ""
+    usage = oai.get("usage") or {}
+    return {
+        "id": _resp_id(),
+        "type": "message",
+        "role": "assistant",
+        "model": req.model,
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": _map_finish(choice.get("finish_reason")),
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": max(int(usage.get("prompt_tokens", 0) or 0), 0),
+            "output_tokens": max(int(usage.get("completion_tokens", 0) or 0), 0),
+        },
     }
 
 

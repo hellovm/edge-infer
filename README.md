@@ -369,6 +369,63 @@ cargo build --release          # 产出 target/release/edge-gui.exe
 
 ---
 
+## 🪟 Windows 安装包（免装 Python）
+
+不想折腾环境？直接下载 **`edge-infer-<版本>-setup.exe`**（GitHub Releases），
+双击安装即可——**目标机器无需预装 Python**。
+
+安装包做了什么：
+
+| 内容 | 说明 |
+|---|---|
+| `edge-gui.exe` | Tauri 原生窗口（自动拉起后端服务） |
+| Rust CLI 内核 | `edge-detect` / `edge-engine` / `edge-tiers` 等 |
+| **内置便携 Python** | 独立的 embeddable Python 运行时 + 全部依赖（`fastapi`/`uvicorn`/`openvino` 等），装在 `runtime\python` 下，**不污染系统 Python** |
+| `models\` 目录 | 自动创建；权重不进安装包，首次在应用「模型」页下载 |
+| 快捷方式 | 桌面 + 开始菜单 |
+
+### 换一台电脑会丢 Python 环境吗？
+
+**用安装包不会。** 关键在于程序如何寻找解释器：
+
+- **旧版（源码直接跑）会出问题** —— 应用只按系统 `PATH` 找 `python.exe`。
+  换机器后若没把 Python 加进 `PATH`，就会报「未找到 Python 解释器」。
+- **新版（安装包）不会** —— `find_python()` 现在**优先使用应用目录内自带的
+  `runtime\python\python.exe`**，并自动为它设置 `PYTHONPATH` 指向内置
+  `Lib\site-packages`。也就是说依赖随应用一起走，换机器/换目录都不受影响。
+  顺序为：**内置运行时 → 项目 `.venv` → 用户级 Python → 系统 `PATH`**。
+
+> 旧版原因剖析：由 `explorer.exe` 双击启动的 GUI 进程继承的是**系统 PATH**，
+> 而不是你在终端里 `export` 过的 PATH。所以哪怕终端里 `python` 能用，
+> 双击 exe 也可能找不到——这也是我们把「内置运行时」放到查找链首位的原因。
+
+### 自行构建安装包
+
+```powershell
+# 需要：Rust、Node（Tauri）、联网、Inno Setup 6
+powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
+# 产出：dist\edge-infer-<版本>-setup.exe
+```
+
+脚本会：编译 Rust/Tauri → 下载 embeddable Python → `pip install` 依赖进内置运行时
+→ 拷贝后端与 exe → 调 Inno Setup 打包。
+
+---
+
+## 🔄 版本更新检测
+
+应用「设置 → 关于」页有 **检查更新** 按钮：点击后查询 GitHub Releases 最新版本，
+
+- 有新版：显示 `发现新版本 x.y.z（当前 a.b.c）· 前往下载`，链接直达安装包；
+- 已最新：提示 `已是最新版本`；
+- 无网络：静默降级为「检查失败（可能无网络）」，不打扰。
+
+Tauri 环境走原生命令 `check_update`（PowerShell 调 GitHub API）；浏览器环境
+直接用 `fetch` 调 GitHub API，逻辑一致（semver 分段比较，容忍 `v` 前缀）。
+
+---
+
+
 ## 🤖 本地 Agent（项目化开发）
 
 工作台「项目」与「Agent 工作区」标签页：用自然语言下达开发任务，模型会自主调用工具

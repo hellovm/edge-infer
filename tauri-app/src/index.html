@@ -999,6 +999,10 @@ const PANELS={
         <div class="frow"><div class="lbl">开发者</div><span>HelloVM</span></div>
         <div class="frow"><div class="lbl">项目主页</div><span class="mono">github.com/hellovm/edge-infer</span></div>
         <div class="frow"><div class="lbl">日志文件</div><span class="mono">logs/edge-server.log</span></div>
+        <div class="frow"><div class="lbl">版本更新</div>
+          <span id="updateNote" style="color:var(--dim)">点击右侧按钮检查 GitHub 上的最新版本</span>
+          <button class="btn" onclick="checkUpdate()">检查更新</button>
+        </div>
       </div>
     </div>`,
 };
@@ -1245,6 +1249,51 @@ async function copyApiExample(){
   const el=$("apiExample"); if(!el) return;
   try{ await navigator.clipboard.writeText(el.value); toast("已复制调用代码"); }
   catch(e){ el.select(); document.execCommand("copy"); toast("已复制调用代码"); }
+}
+
+// ---- 版本更新检查（GitHub Releases）----
+async function checkUpdate(){
+  const note=$("updateNote"); if(!note) return;
+  note.style.color="var(--dim)"; note.textContent="正在检查 GitHub 上的最新版本…";
+  // Tauri 环境走原生命令；浏览器环境直接调 GitHub API。
+  let j=null;
+  try{
+    if(window.__TAURI__ && window.__TAURI__.core){
+      j = await window.__TAURI__.core.invoke("check_update");
+    }else{
+      const r = await fetch("https://api.github.com/repos/hellovm/edge-infer/releases/latest",
+                            {headers:{"Accept":"application/vnd.github+json"}});
+      if(!r.ok) throw new Error("GitHub 返回 "+r.status);
+      const rel=await r.json();
+      const cur="0.3.1", tag=(rel.tag_name||"").replace(/^v/,"");
+      const newer=_verNewer(tag,cur);
+      let dl=rel.html_url||"";
+      (rel.assets||[]).forEach(a=>{ if(/\.(exe|msi)$/i.test(a.name||"")) dl=a.browser_download_url||dl; });
+      j={ok:true,current:cur,latest:tag,has_update:newer,name:rel.name||rel.tag_name,
+         url:rel.html_url||"",download:dl};
+    }
+  }catch(e){
+    note.style.color="var(--warn, #e0a020)"; note.textContent="检查失败："+(e.message||e)+"（可能无网络）";
+    return;
+  }
+  if(!j||j.ok===false){ note.style.color="var(--warn,#e0a020)"; note.textContent="检查失败："+((j&&j.error)||"未知错误"); return; }
+  if(j.has_update){
+    note.style.color="var(--ok, #2ea043)";
+    note.innerHTML=`发现新版本 <b>${esc(j.latest)}</b>（当前 ${esc(j.current)}）· `+
+      `<a href="${esc(j.download||j.url)}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">前往下载</a>`;
+    if(typeof toast==="function") toast(`发现新版本 ${j.latest}，可前往 GitHub 下载`);
+  }else{
+    note.style.color="var(--dim)";
+    note.textContent=`已是最新版本（${esc(j.current)}）`;
+  }
+}
+function _verNewer(a,b){
+  const pa=String(a).replace(/^v/,"").split(/[.\-+]/).map(n=>parseInt(n,10)||0);
+  const pb=String(b).replace(/^v/,"").split(/[.\-+]/).map(n=>parseInt(n,10)||0);
+  for(let i=0;i<Math.max(pa.length,pb.length);i++){
+    const x=pa[i]||0, y=pb[i]||0; if(x!==y) return x>y;
+  }
+  return false;
 }
 function toggleMtp(){ state.mtp=!state.mtp; LS.write("mtp",state.mtp); $("swMtp").classList.toggle("on",state.mtp);
   toast(state.mtp?"已开启 MTP 投机解码":"已关闭 MTP 投机解码"); }

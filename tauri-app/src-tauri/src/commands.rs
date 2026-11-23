@@ -138,3 +138,119 @@ pub fn service_health() -> Result<serde_json::Value, String> {
     }
     serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
 }
+
+// ---------------------------------------------------------------------------
+// update check (GitHub Releases)
+// ---------------------------------------------------------------------------
+const REPO: &str = "hellovm/edge-infer";
+
+/// Parse a dotted version (tolerates a leading `v`) into comparable integers.
+fn parse_version(v: &str) -> Vec<u64> {
+    v.trim()
+        .trim_start_matches('v')
+        .split(['.', '-', '+'])
+        .map(|p| p.parse::<u64>().unwrap_or(0))
+        .collect()
+}
+
+/// True when `remote` is a strictly newer release than `local`.
+fn is_newer(remote: &str, local: &str) -> bool {
+    let (r, l) = (parse_version(remote), parse_version(local));
+    for i in 0..r.len().max(l.len()) {
+        let a = r.get(i).copied().unwrap_or(0);
+        let b = l.get(i).copied().unwrap_or(0);
+        if a != b {
+            return a > b;
+        }
+    }
+    false
+}
+
+/// Ask GitHub for the latest release and compare it with the running version.
+///
+/// Network failures are reported as `{ ok:false, ... }` rather than an Err so
+/// the GUI can stay silent (an offline user must not see an error banner).
+#[tauri::command]
+pub fn check_update() -> serde_json::Value {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    // Invoke-RestMethod parses JSON for us; force TLS 1.2 and send a UA
+    // (GitHub rejects requests without one).
+    let script = format!(
+        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; \
+         $h=@{{'User-Agent'='edge-infer';'Accept'='application/vnd.github+json'}}; \
+         (Invoke-RestMethod -UseBasicParsing -TimeoutSec 8 -Headers $h '{url}') | \
+         ConvertTo-Json -Depth 5"
+    );
+    let out = match Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            return serde_json::json!({
+                "ok": false, "current": current,
+                "error": String::from_utf8_lossy(&o.stderr).trim().to_string(),
+            });
+        }
+        Err(e) => {
+            return serde_json::json!({"ok": false, "current": current, "error": e.to_string()});
+        }
+    };
+
+    let rel: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        Err(e) => {
+            return serde_json::json!({
+                "ok": false, "current": current,
+                "error": format!("解析发布信息失败: {e}"),
+            });
+        }
+    };
+
+    let tag = rel.get("tag_name").and_then(|v| v.as_str()).unwrap_or("");
+    let html = rel.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
+    let name = rel.get("name").and_then(|v| v.as_str()).unwrap_or(tag);
+    let notes = rel.get("body").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Preferred download: the .exe installer asset, else the release page.
+    let mut download = html.to_string();
+    if let Some(assets) = rel.get("assets").and_then(|a| a.as_array()) {
+        for a in assets {
+            let an = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if an.ends_with(".exe") || an.ends_with(".msi") {
+                if let Some(u) = a.get("browser_download_url").and_then(|v| v.as_str()) {
+                    download = u.to_string();
+                    break;
+                }
+            }
+        }
+    }
+
+    serde_json::json!({
+        "ok": true,
+        "current": current,
+        "latest": tag.trim_start_matches('v'),
+        "has_update": is_newer(tag, &current),
+        "name": name,
+        "notes": notes,
+        "url": html,
+        "download": download,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_newer, parse_version};
+
+    #[test]
+    fn version_compare() {
+        assert!(is_newer("v0.4.0", "0.3.1"));
+        assert!(is_newer("0.3.2", "0.3.1"));
+        assert!(is_newer("1.0.0", "0.9.9"));
+        assert!(!is_newer("0.3.1", "0.3.1"));
+        assert!(!is_newer("v0.3.0", "0.3.1"));
+        assert_eq!(parse_version("v0.3.1"), vec![0, 3, 1]);
+    }
+}
+

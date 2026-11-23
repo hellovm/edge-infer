@@ -15,7 +15,7 @@ use sidecar::ServerProc;
 use std::sync::Mutex;
 use tauri::Manager;
 
-pub use commands::{list_devices, run_plan, service_health};
+pub use commands::{check_update, list_devices, run_plan, service_health};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -27,6 +27,7 @@ pub fn run() {
             commands::service_health,
             commands::start_service,
             commands::service_status,
+            commands::check_update,
         ])
         .setup(|app| {
             // Auto-start the Python inference service in the background.

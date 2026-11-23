@@ -4,6 +4,23 @@
 
 ## [Unreleased]
 
+### 新增
+- **Windows 安装包（免装 Python）**：`installer/` 提供 Inno Setup 脚本与一键构建脚本，
+  产出 `edge-infer-<版本>-setup.exe`。安装包内置**便携 Python 运行时**与全部依赖，
+  目标机器无需预装 Python；自动创建桌面 / 开始菜单快捷方式与 `models\` 目录。
+- **Anthropic 兼容接口** `/v1/messages`：可让 Claude Code / Anthropic SDK 直连本地引擎
+  （支持流式 SSE 事件与 `x-api-key` / Bearer 双鉴权），与 `/v1/chat/completions` 复用同一后端。
+- **版本更新检测**：设置 → 关于新增「检查更新」，查询 GitHub Releases 最新版本，
+  提示新版并直达安装包下载（Tauri 走原生命令，浏览器走 GitHub API）。
+
+### 改进
+- **解释器查找更稳健**：`find_python()` 优先使用应用自带的便携运行时
+  （`runtime\python`，并自动设置 `PYTHONPATH`），其次项目 `.venv`、用户级 Python、
+  最后系统 `PATH`。**解决「换一台电脑后找不到 Python / 依赖」的问题**——依赖随应用走。
+- 首次运行自动创建 `models\` 目录并写入说明，避免用户不清楚模型放哪。
+- **专家画像持久化**（Strata 同款）：学习型缓存的专家热度画像可存盘 / 载入，
+  跨会话免冷启动（`learned_cache` 新增 `save_profile` / `load_profile` + 单测）。
+
 ### 移除
 - **移除 Qwen3-Next-80B 与 Qwen3-30B-A3B**：模型清单（`model_catalog.py`）、UI、
   README 中相应条目已删除；本地已下载的 46 GB `qwen3-next-80b-a3b-instruct-gguf`

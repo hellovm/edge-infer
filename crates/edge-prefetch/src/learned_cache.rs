@@ -107,6 +107,40 @@ impl LearnedCache {
         Self::with_capacity(config, 64)
     }
 
+    /// Restore a cache from a previously-saved expert-usage profile, so a
+    /// restart skips the cold start: the per-expert heat scores and the
+    /// learned recency/frequency split are all recovered from disk.
+    ///
+    /// The profile is the whole struct (it is `Serialize`), so this is the
+    /// exact inverse of [`save_profile`](Self::save_profile). Returns
+    /// `None` when the file does not exist or cannot be parsed, so a fresh
+    /// install simply starts with a warm-up rather than an error.
+    pub fn load_profile(path: &std::path::Path) -> Option<Self> {
+        let raw = std::fs::read(path).ok()?;
+        serde_json::from_slice(&raw).ok()
+    }
+
+    /// Persist the current expert-usage profile (heat scores + adapted
+    /// recency split + counters) to `path` so the next launch starts warm.
+    ///
+    /// Call this periodically (Strata saves every 10 minutes) and at
+    /// shutdown. Write-then-rename is not used: a torn write just means
+    /// the next `load_profile` gets `None` and we fall back to warm-up,
+    /// which is acceptable. Returns `Err` on I/O failure.
+    pub fn save_profile(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let raw = serde_json::to_vec(self).map_err(std::io::Error::other)?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &raw)?;
+        // Atomic-ish: replace on the same filesystem; on failure the next
+        // load just sees the old file (or none) — no corruption.
+        std::fs::rename(&tmp, path).or_else(|_| std::fs::copy(&tmp, path).map(|_| ()))
+    }
+
     pub fn config(&self) -> CacheConfig {
         self.config
     }
@@ -505,6 +539,39 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn profile_roundtrip_recovers_warm_state() {
+        let dir = std::env::temp_dir().join(format!("edge-infer-profile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("cache.json");
+        let mut c = LearnedCache::with_capacity(CacheConfig::default(), 64);
+        // Build a warm state: hot experts aged differently, adapted split,
+        // and some recorded accesses so the counters are non-zero.
+        for e in [1u32, 2, 3] {
+            for _ in 0..50 {
+                c.record(e, true);
+                c.tick();
+            }
+        }
+        for _ in 0..500 {
+            c.tick();
+        }
+        let _ = c.ghost_probe(999); // nudge the split
+        let frac_before = c.recency_frac();
+        c.save_profile(&path).unwrap();
+
+        let restored = LearnedCache::load_profile(&path).expect("profile load");
+        assert_eq!(restored.recency_frac(), frac_before, "split must survive round-trip");
+        // Heat scores must be recovered so hot experts outrank cold ones.
+        assert!(restored.score(1) > restored.score(10_000), "hot expert must outrank cold after restore");
+        assert!(restored.accesses() >= 1, "counters must be restored");
+
+        // A missing file must return None (fresh-install warm-up path).
+        let missing = dir.join("does-not-exist.json");
+        assert!(LearnedCache::load_profile(&missing).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

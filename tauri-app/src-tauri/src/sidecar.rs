@@ -34,7 +34,31 @@ fn find_repo_root() -> Option<PathBuf> {
 /// A double-clicked GUI app inherits the *system* PATH, which usually does not
 /// include developer-only shims (e.g. WorkBuddy's bundled python). So we probe
 /// concrete locations first and only then fall back to PATH.
-fn find_python(repo_root: &PathBuf) -> Option<String> {
+///
+/// Returns `(python_path, is_bundled)`. `is_bundled` is true when the
+/// interpreter ships *inside* the app folder (portable/embeddable runtime from
+/// the installer) — in that case the caller must also point PYTHONPATH at its
+/// `Lib\\site-packages`, since an embeddable distribution is not self-contained
+/// by default.
+fn find_python(repo_root: &PathBuf) -> Option<(String, bool)> {
+    // --- 1. Bundled/portable runtime shipped with the app (installer payload).
+    //     Layout: <app>/runtime/python/python.exe   (embeddable distribution)
+    //             <app>/python/python.exe           (flat), <app>/runtime/Scripts
+    let exe_dir = std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let mut bundled: Vec<PathBuf> = Vec::new();
+    for base in [Some(repo_root.clone()), exe_dir].into_iter().flatten() {
+        bundled.push(base.join("runtime").join("python").join("python.exe"));
+        bundled.push(base.join("runtime").join("Scripts").join("python.exe"));
+        bundled.push(base.join("python").join("runtime").join("python.exe"));
+    }
+    for c in &bundled {
+        if c.exists() {
+            return Some((c.to_string_lossy().into_owned(), true));
+        }
+    }
+
+    // --- 2. Developer virtualenv next to the project.
     let mut candidates: Vec<PathBuf> = vec![
         repo_root.join("python").join(".venv").join("Scripts").join("python.exe"),
         repo_root.join(".venv").join("Scripts").join("python.exe"),
@@ -59,7 +83,7 @@ fn find_python(repo_root: &PathBuf) -> Option<String> {
             && Command::new(&c).arg("-c").arg("import uvicorn")
                 .output().map(|o| o.status.success()).unwrap_or(false)
         {
-            return Some(c.to_string_lossy().into_owned());
+            return Some((c.to_string_lossy().into_owned(), false));
         }
     }
     // fall back to PATH (only if it really has uvicorn available)
@@ -67,10 +91,23 @@ fn find_python(repo_root: &PathBuf) -> Option<String> {
         if Command::new(name).arg("-c").arg("import uvicorn")
             .output().map(|o| o.status.success()).unwrap_or(false)
         {
-            return Some(name.to_string());
+            return Some((name.to_string(), false));
         }
     }
     None
+}
+
+/// Given a bundled interpreter path, return its `Lib\site-packages` dir so we
+/// can export PYTHONPATH for embeddable distributions.
+fn bundled_site_packages(python_exe: &str) -> Option<PathBuf> {
+    let dir = PathBuf::from(python_exe).parent()?.to_path_buf(); // .../runtime/python
+    // Try both `python/Lib/site-packages` and sibling `Lib/site-packages`.
+    let cands = [
+        dir.join("Lib").join("site-packages"),
+        dir.parent().map(|p| p.join("Lib").join("site-packages")).unwrap_or_default(),
+        dir.join("lib").join("site-packages"),
+    ];
+    cands.into_iter().find(|p| p.exists())
 }
 
 /// Check whether the service really answers /health over HTTP.
@@ -98,6 +135,31 @@ pub fn service_up() -> bool {
     }
 }
 
+/// Create `<root>/models` (+ a small README) on first run.
+///
+/// The installer deliberately does NOT bundle multi-GB model weights; instead
+/// the app downloads them on demand (Models panel). This just guarantees the
+/// directory exists and explains the layout.
+fn init_models_dir(repo_root: &PathBuf) {
+    let models = repo_root.join("models");
+    if models.is_dir() {
+        return; // already initialised — never touch user data
+    }
+    if std::fs::create_dir_all(&models).is_err() {
+        return;
+    }
+    let readme = "edge-infer 模型目录\r\n\
+        ==================\r\n\
+        本目录存放本地模型权重。首次使用请在应用的「模型」页点击下载，\r\n\
+        或手动把模型文件夹放到这里。\r\n\r\n\
+        推荐入门组合（普通办公本可离线运行 8B）：\r\n\
+          - qwen3-8b-int4-cw-ov   (OpenVINO int4，NPU/CPU 高能效)\r\n\
+          - qwen3-8b-gguf         (llama.cpp，N 卡 CUDA)\r\n\r\n\
+        超大模型（N 卡 6-8G 显存 + 三层卸载）：\r\n\
+          - qwen3.8-flash-next-gguf  (MoE，需 SSD)\r\n";
+    let _ = std::fs::write(models.join("README.txt"), readme);
+}
+
 /// Start the Python server if it isn't already running.
 /// Returns Ok(true) if we launched it, Ok(false) if it was already up.
 pub fn ensure_server(proc: &ServerProc) -> Result<bool, String> {
@@ -107,8 +169,12 @@ pub fn ensure_server(proc: &ServerProc) -> Result<bool, String> {
 
     let repo_root = find_repo_root()
         .ok_or_else(|| "找不到项目根目录（python/edge_server 不存在）".to_string())?;
-    let python = find_python(&repo_root)
-        .ok_or_else(|| "未找到 Python 解释器，请安装 Python 3.10+ 并加入 PATH".to_string())?;
+
+    // Prefer a bundled portable runtime (shipped by the installer) so a fresh
+    // machine without Python still works. Falls back to a system interpreter.
+    let (python, is_bundled) = find_python(&repo_root)
+        .ok_or_else(|| "未找到 Python 解释器，请安装 Python 3.10+ 并加入 PATH，\
+                        或使用带内置运行时的安装包".to_string())?;
 
     // Working dir: <root>/python  (so `-m edge_server.openai_server` resolves)
     let workdir = if repo_root.join("python").join("edge_server").exists() {
@@ -116,6 +182,11 @@ pub fn ensure_server(proc: &ServerProc) -> Result<bool, String> {
     } else {
         repo_root.clone()
     };
+
+    // Ensure the models/ dir exists on a fresh install, and drop a short README
+    // so the user knows where to put / how to download models. Never overwrite
+    // an existing models dir or its contents.
+    init_models_dir(&repo_root);
 
     // Keep a sidecar log so a failed launch is diagnosable. Previously both
     // streams went to /dev/null, so a missing module or port conflict left the
@@ -149,6 +220,22 @@ pub fn ensure_server(proc: &ServerProc) -> Result<bool, String> {
         if m.exists() {
             cmd.env("EDGE_MODEL_DIR", m);
         }
+    }
+
+    // Bundled embeddable runtime: its site-packages isn't on sys.path by
+    // default, so export PYTHONPATH explicitly. Also keep any pre-existing
+    // PYTHONPATH the user may have set.
+    if is_bundled {
+        if let Some(sp) = bundled_site_packages(&python) {
+            let mut parts = vec![sp.to_string_lossy().into_owned()];
+            if let Some(existing) = std::env::var_os("PYTHONPATH") {
+                parts.push(existing.to_string_lossy().into_owned());
+            }
+            cmd.env("PYTHONPATH", parts.join(";"));
+        }
+        // Embeddable distros ship python3xx._pth which disables site imports;
+        // ask Python to add site-packages anyway.
+        cmd.env("PYTHONHOME", PathBuf::from(&python).parent().unwrap_or(&repo_root));
     }
 
     // Hide the console window on Windows.

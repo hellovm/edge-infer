@@ -403,6 +403,70 @@ cargo build --release          # -> target/release/edge-gui.exe
 
 ---
 
+## 🪟 Windows installer (no Python required)
+
+Don't want to wrangle an environment? Grab **`edge-infer-<version>-setup.exe`**
+from GitHub Releases and double-click — **the target machine needs no Python
+installed**.
+
+What the installer ships:
+
+| Item | Notes |
+|---|---|
+| `edge-gui.exe` | Tauri native window (auto-starts the backend) |
+| Rust CLI kernel | `edge-detect` / `edge-engine` / `edge-tiers`, … |
+| **Portable Python** | A self-contained embeddable Python runtime + all deps (`fastapi`/`uvicorn`/`openvino` …) under `runtime\python` — **does not touch your system Python** |
+| `models\` dir | Created automatically; weights are *not* bundled — download them in the app's *Models* page |
+| Shortcuts | Desktop + Start menu |
+
+### Will a new machine lose the Python environment?
+
+**Not with the installer.** The key is how the app resolves its interpreter:
+
+- **Old (run from source)** — the app only searched the system `PATH` for
+  `python.exe`. On a different machine without Python on `PATH` it failed with
+  "no Python interpreter found".
+- **New (installer)** — `find_python()` now **prefers the portable runtime
+  inside the app folder** (`runtime\python\python.exe`) and automatically sets
+  `PYTHONPATH` to its bundled `Lib\site-packages`. The deps travel with the app,
+  so machine or directory changes don't matter. Search order:
+  **bundled runtime → project `.venv` → user-level Python → system `PATH`**.
+
+> Why the old version broke: a GUI launched by double-clicking inherits the
+> *system* PATH, not the PATH you exported in a terminal. So even if `python`
+> works in your shell, the double-clicked exe may not find it — which is exactly
+> why the bundled runtime now sits first in the search chain.
+
+### Building the installer yourself
+
+```powershell
+# requires: Rust, Node (Tauri), internet, Inno Setup 6
+powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
+# output: dist\edge-infer-<version>-setup.exe
+```
+
+The script builds Rust/Tauri → downloads embeddable Python → `pip install`s the
+deps into that runtime → stages the backend + exes → runs Inno Setup.
+
+---
+
+## 🔄 Update checking
+
+*Settings → About* has a **Check for updates** button: it queries the latest
+GitHub Release and either
+
+- shows `new version x.y.z available (current a.b.c) · download` linking to the
+  installer, or
+- says `up to date`, or
+- degrades quietly to "check failed (offline?)" when there's no network.
+
+Under Tauri it calls the native `check_update` command (PowerShell → GitHub API);
+in a browser it calls the GitHub API via `fetch`. Both use the same semver
+segment comparison (tolerating a `v` prefix).
+
+---
+
+
 ## 🤖 Local agent (project-style development)
 
 The *Projects* and *Agent workspace* tabs let you give development tasks in
