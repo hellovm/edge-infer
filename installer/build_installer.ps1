@@ -85,9 +85,12 @@ $py = Join-Path $Runtime "python.exe"
 # bootstrap pip
 $getpip = Join-Path $env:TEMP "get-pip.py"
 if (-not (Test-Path $getpip)) { Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $getpip }
-& $py $getpip --no-warn-script-location
+$Mirror = "https://pypi.tuna.tsinghua.edu.cn/simple"
+# get-pip 走镜像：直连 pypi.org 在部分网络下会卡死（实测 >60 分钟无进展）
+& $py $getpip --no-warn-script-location -i $Mirror --trusted-host pypi.tuna.tsinghua.edu.cn
 $req = Join-Path $Root "python\requirements.txt"
-& $py -m pip install --no-warn-script-location --upgrade -r $req
+& $py -m pip install --no-warn-script-location --upgrade -r $req `
+    -i $Mirror --trusted-host pypi.tuna.tsinghua.edu.cn --timeout 60 --retries 3
 
 # --- 5. stage backend + exes + docs -----------------------------------------
 Step "Staging files into payload"
