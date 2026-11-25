@@ -27,7 +27,18 @@ function Ensure-Dir($p) { if (-not (Test-Path $p)) { New-Item -ItemType Director
 
 # --- 0. clean payload --------------------------------------------------------
 Step "Preparing payload dir"
-if (Test-Path $Payload) { Remove-Item -Recurse -Force $Payload }
+# 杀软会在写入后短暂锁定新文件，直接删除会偶发 IOException；
+# 重试几次即可，避免整轮构建白跑。
+if (Test-Path $Payload) {
+  for ($i = 1; $i -le 6; $i++) {
+    try { Remove-Item -Recurse -Force $Payload -ErrorAction Stop; break }
+    catch {
+      if ($i -eq 6) { throw }
+      Write-Host ("payload 被占用，第 $i 次重试删除...") -ForegroundColor Yellow
+      Start-Sleep -Seconds 5
+    }
+  }
+}
 Ensure-Dir $Payload
 Ensure-Dir $Dist
 
