@@ -962,8 +962,8 @@ const PANELS={
         <div class="frow"><div class="lbl">GPU 专家缓存<small>MiB · 把高频专家钉在显存（0=关闭）。注意：上游实测可能损失约 10%</small></div>
           <input type="number" id="advMoeCache" class="btn" min="0" step="256" value="0" style="width:110px" title="MiB">
         </div>
-        <div class="frow"><div class="lbl">内存驻留预算<small>MiB · 限制引擎钉住的专家内存，防被系统页缓存抢占（0=不限）</small></div>
-          <input type="number" id="advResident" class="btn" min="0" step="512" value="0" style="width:110px" title="MiB">
+        <div class="frow"><div class="lbl">内存驻留预算<small>当前引擎不支持（需要特定分支的 llama.cpp），暂不可用；引擎会自动忽略</small></div>
+          <input type="number" id="advResident" class="btn" min="0" step="512" value="0" style="width:110px" title="MiB" disabled>
         </div>
         <div class="frow"><div class="lbl">Flash Attention<small>加速注意力并支撑 KV 量化，建议开启</small></div>
           <div class="switch on" id="swFA" onclick="toggleFA()"><i></i></div></div>

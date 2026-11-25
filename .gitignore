@@ -52,3 +52,10 @@ python/verify_4b.py
 .tmp/
 *.part
 *.incomplete
+
+# ---- 本地引擎二进制与基准产物（不入库）----
+tools/
+bench/
+python/_dl_gyro.py
+python/bench_agention_vs_upstream.py
+python/safe_bench.py

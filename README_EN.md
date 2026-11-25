@@ -2,7 +2,7 @@
 
 **Run very large models locally on an ordinary PC · energy-efficient on-device inference**
 
-[![Version](https://img.shields.io/badge/version-0.3.1-2ea44f.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.2-2ea44f.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-Free%20personal%20%7C%20Commercial-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![OpenVINO](https://img.shields.io/badge/OpenVINO-2026.4-0091D5.svg)](https://docs.openvino.ai/)

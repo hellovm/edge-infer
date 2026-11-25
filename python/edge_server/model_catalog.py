@@ -82,15 +82,20 @@ MODELS: List[dict] = [
             "nvidia-agention": {
                 "repo": "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF",
                 "quant": "GGUF Gyro-S TQ1_0 (1-bit, APR)",
-                "backend": "AgentionAI llama.cpp (CUDA)",
+                "backend": "AgentionAI llama.cpp (Vulkan)",
                 "engine": "agention",
-                "size_gb": 29.7,
+                # 29.7 weights + 0.9 mmproj + 2.7 draft + 28.8 PLE sidecar.
+                "size_gb": 62.1,
                 "weights_gb": 29.7,
-                "ram_hint": "≥ 32 GB 内存：权重全驻内存，无需每 token 读盘（速度档）",
-                "min_ssd_gb": 32,
-                # -noPLE = no PLE/engram table → nothing extra on SSD.
-                # The draft ships at the repo root (Agention layout).
+                # PLE (per_layer_token_embd) is REQUIRED by the Gyro arch:
+                # the -noPLE main file pairs with this sidecar via --model-ple,
+                # and the table stays on disk (--ngram-on-disk).
+                "ram_hint": "≥ 32 GB 内存：权重 29.7 GB 全驻内存；PLE 表 28.8 GB 留 SSD",
+                "min_ssd_gb": 65,
+                # -noPLE = main weights only (arch still needs the PLE sidecar,
+                # downloaded together). The draft ships at the repo root.
                 "files": ["*Gyro-S-TQ1_0-noPLE.gguf", "*mmproj-F16.gguf",
+                          "Qwen3.8-Flash-Next-PLE-IQ4_NL-GyroS.gguf",
                           "mtp-Qwen3.8-Flash-Next-draft.gguf"],
                 "draft": {
                     "file": "mtp-Qwen3.8-Flash-Next-draft.gguf",

@@ -1,6 +1,6 @@
 [package]
 name = "edge-gui"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "edge-infer Tauri GUI: 三层卸载多硬件推理工作台"
 license = "LicenseRef-EdgeInfer-Dual"
